@@ -11,7 +11,7 @@
 - 广播发送（`terminal.sendText(command, true)`）
 - 敏感指令关键词拦截（二次确认）
 - 大规模终端分波发送（可配置延迟）
-- `{index}` 变量注入（例如 `echo Agent {index}`）
+- 动态占位符注入：`{index}`、`{name}`、`{name:quoted}`（例如 `echo "{name}" #{index}`）
 - 侧边栏控制面板（终端选择、发送内容、常用配置）
 - 输入后自动发送（可配置延迟）
 

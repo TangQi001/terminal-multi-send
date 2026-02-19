@@ -73,7 +73,10 @@ export class TerminalManager implements vscode.Disposable {
     const preselected = this.findPreselected(terminals, autoSelectRegex);
     const items: TerminalQuickPickItem[] = terminals.map((descriptor, index) => ({
       label: `$(terminal) ${descriptor.name}`,
-      description: descriptor.processId ? `PID: ${descriptor.processId}` : "PID: Unknown",
+      description:
+        descriptor.processId !== undefined
+          ? vscode.l10n.t("PID: {0}", String(descriptor.processId))
+          : vscode.l10n.t("PID: Unknown"),
       detail: vscode.l10n.t("Terminal {0}", String(index + 1)),
       picked: preselected.has(descriptor.terminal),
       terminal: descriptor.terminal

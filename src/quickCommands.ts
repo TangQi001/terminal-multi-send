@@ -26,7 +26,7 @@ export class QuickCommands {
         "Broadcast command to {0} terminal(s)",
         String(targetCount)
       ),
-      placeHolder: vscode.l10n.t("e.g. npm run dev"),
+      placeHolder: vscode.l10n.t("e.g. echo {name}"),
       value: initial,
       ignoreFocusOut: true
     });

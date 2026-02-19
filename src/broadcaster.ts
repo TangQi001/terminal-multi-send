@@ -29,7 +29,10 @@ export class Broadcaster {
 
     if (terminals.length > waveThreshold) {
       for (let i = 0; i < terminals.length; i += 1) {
-        terminals[i].sendText(this.injectIndex(text, i + 1), true);
+        this.sendResolvedCommand(
+          terminals[i],
+          this.injectPlaceholders(text, terminals[i], i + 1)
+        );
         if (i < terminals.length - 1 && waveDelayMs > 0) {
           await delay(waveDelayMs);
         }
@@ -38,7 +41,10 @@ export class Broadcaster {
     }
 
     terminals.forEach((terminal, index) => {
-      terminal.sendText(this.injectIndex(text, index + 1), true);
+      this.sendResolvedCommand(
+        terminal,
+        this.injectPlaceholders(text, terminal, index + 1)
+      );
     });
     return terminals.length;
   }
@@ -81,8 +87,26 @@ export class Broadcaster {
     });
   }
 
-  private injectIndex(command: string, index: number): string {
-    return command.replace(/\{index\}/g, String(index));
+  private injectPlaceholders(
+    command: string,
+    terminal: vscode.Terminal,
+    index: number
+  ): string {
+    const terminalName = terminal.name ?? "";
+    return command
+      .replace(/\{index\}/g, String(index))
+      .replace(/\{name:quoted\}/g, this.quoteForShell(terminalName))
+      .replace(/\{name\}/g, terminalName);
+  }
+
+  private quoteForShell(value: string): string {
+    return `"${value.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"`;
+  }
+
+  private sendResolvedCommand(terminal: vscode.Terminal, command: string): void {
+    const normalized = command.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    terminal.sendText(normalized, false);
+    terminal.sendText("", true);
   }
 }
 

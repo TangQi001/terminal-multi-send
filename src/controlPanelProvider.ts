@@ -245,6 +245,9 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
       command: vscode.l10n.t("Command"),
       sendShortcut: vscode.l10n.t("Ctrl/Cmd + Enter to send"),
       commandInputPlaceholder: vscode.l10n.t("Enter text or command to broadcast"),
+      commandPlaceholderHelp: vscode.l10n.t(
+        "Placeholders: {name}, {index}, quoted name: {name:quoted}"
+      ),
       sendToSelectedTerminals: vscode.l10n.t("Send to Selected Terminals"),
       autoSend: vscode.l10n.t("Auto Send"),
       autoSendDescription: vscode.l10n.t("Send automatically after input"),
@@ -257,7 +260,8 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
       waveThreshold: vscode.l10n.t("Wave Threshold"),
       waveDelay: vscode.l10n.t("Wave Delay"),
       noTerminalsAvailable: vscode.l10n.t("No terminals available."),
-      unknown: vscode.l10n.t("Unknown")
+      pidWithValue: vscode.l10n.t("PID: {0}"),
+      pidUnknown: vscode.l10n.t("PID: Unknown")
     };
     const i18nJson = JSON.stringify(i18n);
 
@@ -374,6 +378,9 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
       <span class="sub">${i18n.sendShortcut}</span>
     </div>
     <textarea id="commandInput" placeholder="${i18n.commandInputPlaceholder}"></textarea>
+    <div class="row">
+      <span class="sub">${i18n.commandPlaceholderHelp}</span>
+    </div>
     <div class="row" style="margin-top:8px;">
       <button id="sendBtn" class="primary">${i18n.sendToSelectedTerminals}</button>
     </div>
@@ -502,8 +509,8 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
         const meta = document.createElement("span");
         meta.className = "terminal-meta";
         meta.textContent = terminal.processId
-          ? "(PID: " + terminal.processId + ")"
-          : "(PID: " + i18n.unknown + ")";
+          ? "(" + format(i18n.pidWithValue, terminal.processId) + ")"
+          : "(" + i18n.pidUnknown + ")";
 
         wrapper.appendChild(checkbox);
         wrapper.appendChild(text);
