@@ -13,11 +13,11 @@ interface TerminalQuickPickItem extends vscode.QuickPickItem {
 const PID_TIMEOUT_MS = 150;
 const SELECT_ALL_BUTTON: vscode.QuickInputButton = {
   iconPath: new vscode.ThemeIcon("check-all"),
-  tooltip: "全选"
+  tooltip: vscode.l10n.t("Select All")
 };
 const CLEAR_ALL_BUTTON: vscode.QuickInputButton = {
   iconPath: new vscode.ThemeIcon("clear-all"),
-  tooltip: "清空"
+  tooltip: vscode.l10n.t("Clear")
 };
 
 export class TerminalManager implements vscode.Disposable {
@@ -60,7 +60,9 @@ export class TerminalManager implements vscode.Disposable {
     autoSelectRegex: string
   ): Promise<vscode.Terminal[]> {
     if (terminals.length === 0) {
-      vscode.window.showErrorMessage("未检测到可用终端，请先打开至少一个集成终端。");
+      vscode.window.showErrorMessage(
+        vscode.l10n.t("No terminal found. Open at least one integrated terminal first.")
+      );
       return [];
     }
 
@@ -72,7 +74,7 @@ export class TerminalManager implements vscode.Disposable {
     const items: TerminalQuickPickItem[] = terminals.map((descriptor, index) => ({
       label: `$(terminal) ${descriptor.name}`,
       description: descriptor.processId ? `PID: ${descriptor.processId}` : "PID: Unknown",
-      detail: `Terminal ${index + 1}`,
+      detail: vscode.l10n.t("Terminal {0}", String(index + 1)),
       picked: preselected.has(descriptor.terminal),
       terminal: descriptor.terminal
     }));
@@ -98,7 +100,7 @@ export class TerminalManager implements vscode.Disposable {
       }
     } catch {
       void vscode.window.showWarningMessage(
-        `autoSelectRegex 无效，已忽略: ${autoSelectRegex}`
+        vscode.l10n.t("Invalid autoSelectRegex ignored: {0}", autoSelectRegex)
       );
     }
 
@@ -132,8 +134,10 @@ export class TerminalManager implements vscode.Disposable {
       quickPick.ignoreFocusOut = true;
       quickPick.matchOnDescription = true;
       quickPick.matchOnDetail = true;
-      quickPick.title = "Cursor Terminal Nexus";
-      quickPick.placeholder = "选择目标终端（可多选）";
+      quickPick.title = vscode.l10n.t("Cursor Terminal Nexus");
+      quickPick.placeholder = vscode.l10n.t(
+        "Select target terminals (multi-select supported)"
+      );
       quickPick.items = items;
       quickPick.selectedItems = items.filter((item) => item.picked);
       quickPick.buttons = [SELECT_ALL_BUTTON, CLEAR_ALL_BUTTON];

@@ -1,0 +1,20 @@
+{
+  "extension.displayName": "Cursor Terminal Nexus",
+  "extension.description": "Select multiple integrated terminals and broadcast a command in one shot.",
+  "extension.category": "Cursor Terminal Nexus",
+  "extension.config.title": "Cursor Terminal Nexus",
+  "command.broadcast.title": "Broadcast Command",
+  "command.openControlPanel.title": "Open Control Panel",
+  "view.controlPanel.name": "Terminal Nexus",
+  "config.autoSelectRegex.description": "Regex used to preselect terminals by terminal name.",
+  "config.requireConfirmBeforeBroadcast.description": "Always show a confirmation dialog before sending commands.",
+  "config.enableSensitiveCommandGuard.description": "Warn before sending potentially destructive commands.",
+  "config.sensitiveKeywords.description": "Case-insensitive keyword list for sensitive command detection.",
+  "config.waveThreshold.description": "If selected terminals exceed this number, use wave sending with delay.",
+  "config.waveDelayMs.description": "Delay in milliseconds between sends when wave mode is enabled.",
+  "config.quickCommands.description": "Preset commands shown before manual input.",
+  "config.enableHistory.description": "Enable command history for quick reuse.",
+  "config.maxHistory.description": "Maximum number of history items persisted in global state.",
+  "config.autoSendEnabled.description": "When enabled, the control panel auto-sends text after input delay.",
+  "config.autoSendDelayMs.description": "Auto-send debounce delay in milliseconds."
+}

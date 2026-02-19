@@ -173,7 +173,9 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
       .filter((item) => this.selectedKeys.has(item.key))
       .map((item) => item.terminal);
     if (targets.length === 0) {
-      void vscode.window.showWarningMessage("请先选择至少一个目标终端。");
+      void vscode.window.showWarningMessage(
+        vscode.l10n.t("Select at least one target terminal first.")
+      );
       return;
     }
 
@@ -187,7 +189,10 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
     }
 
     this.quickCommands.record(text);
-    vscode.window.setStatusBarMessage(`$(zap) 已广播至 ${sentCount} 个终端`, 3000);
+    vscode.window.setStatusBarMessage(
+      vscode.l10n.t("$(zap) Broadcast sent to {0} terminal(s)", String(sentCount)),
+      3000
+    );
   }
 
   private async handleSettingUpdate(
@@ -211,7 +216,10 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
         }
       } catch {
         void vscode.window.showWarningMessage(
-          `autoSelectRegex 无效，已忽略本次修改: ${String(normalized)}`
+          vscode.l10n.t(
+            "Invalid autoSelectRegex ignored for this update: {0}",
+            String(normalized)
+          )
         );
         return;
       }
@@ -227,13 +235,39 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
   private getWebviewHtml(webview: vscode.Webview): string {
     const nonce = getNonce();
     const csp = `default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';`;
+    const locale = /^zh(-|$)/i.test(vscode.env.language) ? "zh-CN" : "en";
+    const i18n = {
+      title: vscode.l10n.t("Terminal Nexus"),
+      refresh: vscode.l10n.t("Refresh"),
+      selectAll: vscode.l10n.t("Select All"),
+      clear: vscode.l10n.t("Clear"),
+      selectedCount: vscode.l10n.t("Selected {0} / {1}"),
+      command: vscode.l10n.t("Command"),
+      sendShortcut: vscode.l10n.t("Ctrl/Cmd + Enter to send"),
+      commandInputPlaceholder: vscode.l10n.t("Enter text or command to broadcast"),
+      sendToSelectedTerminals: vscode.l10n.t("Send to Selected Terminals"),
+      autoSend: vscode.l10n.t("Auto Send"),
+      autoSendDescription: vscode.l10n.t("Send automatically after input"),
+      autoSendDelay: vscode.l10n.t("Auto-send Delay"),
+      autoSelectRegex: vscode.l10n.t("Auto-select Regex"),
+      autoSelectRegexPlaceholder: vscode.l10n.t("e.g. Agent.*"),
+      confirmBeforeBroadcast: vscode.l10n.t("Confirm Before Send"),
+      sensitiveCommandGuard: vscode.l10n.t("Sensitive Command Guard"),
+      enabled: vscode.l10n.t("Enabled"),
+      waveThreshold: vscode.l10n.t("Wave Threshold"),
+      waveDelay: vscode.l10n.t("Wave Delay"),
+      noTerminalsAvailable: vscode.l10n.t("No terminals available."),
+      unknown: vscode.l10n.t("Unknown")
+    };
+    const i18nJson = JSON.stringify(i18n);
+
     return `<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="${locale}">
 <head>
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="${csp}">
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Terminal Nexus</title>
+  <title>${i18n.title}</title>
   <style>
     :root {
       color-scheme: light dark;
@@ -326,9 +360,9 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
 <body>
   <div class="block">
     <div class="row">
-      <button id="refreshBtn">刷新</button>
-      <button id="selectAllBtn">全选</button>
-      <button id="clearBtn">清空</button>
+      <button id="refreshBtn">${i18n.refresh}</button>
+      <button id="selectAllBtn">${i18n.selectAll}</button>
+      <button id="clearBtn">${i18n.clear}</button>
       <span id="selectedCount" class="sub"></span>
     </div>
     <div id="terminalList" class="terminal-list"></div>
@@ -336,49 +370,50 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
 
   <div class="block">
     <div class="row">
-      <span class="label">发送内容</span>
-      <span class="sub">Ctrl/Cmd + Enter 发送</span>
+      <span class="label">${i18n.command}</span>
+      <span class="sub">${i18n.sendShortcut}</span>
     </div>
-    <textarea id="commandInput" placeholder="输入要广播的消息或命令"></textarea>
+    <textarea id="commandInput" placeholder="${i18n.commandInputPlaceholder}"></textarea>
     <div class="row" style="margin-top:8px;">
-      <button id="sendBtn" class="primary">发送到已选终端</button>
+      <button id="sendBtn" class="primary">${i18n.sendToSelectedTerminals}</button>
     </div>
   </div>
 
   <div class="block">
     <div class="row">
-      <span class="label">自动发送</span>
-      <label><input type="checkbox" id="autoSendEnabled" /> 输入后自动发送</label>
+      <span class="label">${i18n.autoSend}</span>
+      <label><input type="checkbox" id="autoSendEnabled" /> ${i18n.autoSendDescription}</label>
     </div>
     <div class="row">
-      <span class="label">自动发送延迟</span>
+      <span class="label">${i18n.autoSendDelay}</span>
       <input id="autoSendDelayMs" type="number" min="200" step="100" />
       <span class="sub">ms</span>
     </div>
     <div class="row">
-      <span class="label">自动勾选正则</span>
-      <input id="autoSelectRegex" type="text" placeholder="例如 Agent.*" />
+      <span class="label">${i18n.autoSelectRegex}</span>
+      <input id="autoSelectRegex" type="text" placeholder="${i18n.autoSelectRegexPlaceholder}" />
     </div>
     <div class="row">
-      <span class="label">发送前确认</span>
-      <label><input type="checkbox" id="requireConfirmBeforeBroadcast" /> 启用</label>
+      <span class="label">${i18n.confirmBeforeBroadcast}</span>
+      <label><input type="checkbox" id="requireConfirmBeforeBroadcast" /> ${i18n.enabled}</label>
     </div>
     <div class="row">
-      <span class="label">敏感词拦截</span>
-      <label><input type="checkbox" id="enableSensitiveCommandGuard" /> 启用</label>
+      <span class="label">${i18n.sensitiveCommandGuard}</span>
+      <label><input type="checkbox" id="enableSensitiveCommandGuard" /> ${i18n.enabled}</label>
     </div>
     <div class="row">
-      <span class="label">分波阈值</span>
+      <span class="label">${i18n.waveThreshold}</span>
       <input id="waveThreshold" type="number" min="1" step="1" />
     </div>
     <div class="row">
-      <span class="label">分波延迟</span>
+      <span class="label">${i18n.waveDelay}</span>
       <input id="waveDelayMs" type="number" min="0" step="5" />
       <span class="sub">ms</span>
     </div>
   </div>
 
   <script nonce="${nonce}">
+    const i18n = ${i18nJson};
     const vscode = acquireVsCodeApi();
     let state = {
       terminals: [],
@@ -412,6 +447,13 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
     const waveThreshold = document.getElementById("waveThreshold");
     const waveDelayMs = document.getElementById("waveDelayMs");
 
+    function format(message, ...args) {
+      return message.replace(/\\{(\\d+)\\}/g, (_, index) => {
+        const value = args[Number(index)];
+        return value === undefined ? "" : String(value);
+      });
+    }
+
     function post(message) {
       vscode.postMessage(message);
     }
@@ -438,9 +480,9 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
       if (state.terminals.length === 0) {
         const empty = document.createElement("div");
         empty.className = "sub";
-        empty.textContent = "当前没有可用终端。";
+        empty.textContent = i18n.noTerminalsAvailable;
         terminalList.appendChild(empty);
-        selectedCount.textContent = "已选 0 / 0";
+        selectedCount.textContent = format(i18n.selectedCount, 0, 0);
         return;
       }
 
@@ -459,7 +501,9 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
 
         const meta = document.createElement("span");
         meta.className = "terminal-meta";
-        meta.textContent = terminal.processId ? "(PID: " + terminal.processId + ")" : "(PID: Unknown)";
+        meta.textContent = terminal.processId
+          ? "(PID: " + terminal.processId + ")"
+          : "(PID: " + i18n.unknown + ")";
 
         wrapper.appendChild(checkbox);
         wrapper.appendChild(text);
@@ -467,7 +511,11 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
         terminalList.appendChild(wrapper);
       });
 
-      selectedCount.textContent = "已选 " + state.selectedKeys.length + " / " + state.terminals.length;
+      selectedCount.textContent = format(
+        i18n.selectedCount,
+        state.selectedKeys.length,
+        state.terminals.length
+      );
     }
 
     function renderSettings() {

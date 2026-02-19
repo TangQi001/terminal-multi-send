@@ -1,12 +1,22 @@
 {
   "name": "cursor-terminal-nexus",
-  "displayName": "Cursor Terminal Nexus",
-  "description": "Select multiple integrated terminals and broadcast a command in one shot.",
-  "version": "0.0.1",
+  "displayName": "%extension.displayName%",
+  "description": "%extension.description%",
+  "version": "0.0.2",
   "publisher": "local",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TangQi001/terminal-multi-send.git"
+  },
+  "bugs": {
+    "url": "https://github.com/TangQi001/terminal-multi-send/issues"
+  },
+  "homepage": "https://github.com/TangQi001/terminal-multi-send#readme",
   "engines": {
     "vscode": "^1.90.0"
   },
+  "l10n": "./l10n",
   "categories": [
     "Other"
   ],
@@ -20,13 +30,13 @@
     "commands": [
       {
         "command": "cursorTerminalNexus.broadcast",
-        "title": "Cursor Terminal Nexus: Broadcast Command",
-        "category": "Cursor Terminal Nexus"
+        "title": "%command.broadcast.title%",
+        "category": "%extension.category%"
       },
       {
         "command": "cursorTerminalNexus.openControlPanel",
-        "title": "Cursor Terminal Nexus: Open Control Panel",
-        "category": "Cursor Terminal Nexus"
+        "title": "%command.openControlPanel.title%",
+        "category": "%extension.category%"
       }
     ],
     "keybindings": [
@@ -37,22 +47,22 @@
       }
     ],
     "configuration": {
-      "title": "Cursor Terminal Nexus",
+      "title": "%extension.config.title%",
       "properties": {
         "cursorTerminalNexus.autoSelectRegex": {
           "type": "string",
           "default": "",
-          "description": "Regex used to preselect terminals by terminal name."
+          "description": "%config.autoSelectRegex.description%"
         },
         "cursorTerminalNexus.requireConfirmBeforeBroadcast": {
           "type": "boolean",
           "default": false,
-          "description": "Always show a confirmation dialog before sending commands."
+          "description": "%config.requireConfirmBeforeBroadcast.description%"
         },
         "cursorTerminalNexus.enableSensitiveCommandGuard": {
           "type": "boolean",
           "default": true,
-          "description": "Warn before sending potentially destructive commands."
+          "description": "%config.enableSensitiveCommandGuard.description%"
         },
         "cursorTerminalNexus.sensitiveKeywords": {
           "type": "array",
@@ -68,19 +78,19 @@
             "del /s",
             "poweroff"
           ],
-          "description": "Case-insensitive keyword list for sensitive command detection."
+          "description": "%config.sensitiveKeywords.description%"
         },
         "cursorTerminalNexus.waveThreshold": {
           "type": "number",
           "default": 20,
           "minimum": 1,
-          "description": "If selected terminals exceed this number, use wave sending with delay."
+          "description": "%config.waveThreshold.description%"
         },
         "cursorTerminalNexus.waveDelayMs": {
           "type": "number",
           "default": 20,
           "minimum": 0,
-          "description": "Delay in milliseconds between sends when wave mode is enabled."
+          "description": "%config.waveDelayMs.description%"
         },
         "cursorTerminalNexus.quickCommands": {
           "type": "array",
@@ -88,29 +98,29 @@
             "type": "string"
           },
           "default": [],
-          "description": "Preset commands shown before manual input."
+          "description": "%config.quickCommands.description%"
         },
         "cursorTerminalNexus.enableHistory": {
           "type": "boolean",
           "default": true,
-          "description": "Enable command history for quick reuse."
+          "description": "%config.enableHistory.description%"
         },
         "cursorTerminalNexus.maxHistory": {
           "type": "number",
           "default": 30,
           "minimum": 1,
-          "description": "Maximum number of history items persisted in global state."
+          "description": "%config.maxHistory.description%"
         },
         "cursorTerminalNexus.autoSendEnabled": {
           "type": "boolean",
           "default": false,
-          "description": "When enabled, the control panel auto-sends text after input delay."
+          "description": "%config.autoSendEnabled.description%"
         },
         "cursorTerminalNexus.autoSendDelayMs": {
           "type": "number",
           "default": 800,
           "minimum": 200,
-          "description": "Auto-send debounce delay in milliseconds."
+          "description": "%config.autoSendDelayMs.description%"
         }
       }
     },
@@ -118,20 +128,24 @@
       "explorer": [
         {
           "id": "cursorTerminalNexus.controlPanel",
-          "name": "Terminal Nexus",
+          "name": "%view.controlPanel.name%",
           "type": "webview"
         }
       ]
     }
   },
   "scripts": {
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
+    "check-types": "tsc --noEmit -p ./",
+    "compile": "npm run check-types && node ./scripts/esbuild.js",
+    "watch": "node ./scripts/esbuild.js --watch",
+    "package": "npm run check-types && node ./scripts/esbuild.js --production",
+    "vscode:prepublish": "npm run package",
     "pretest": "npm run compile"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/vscode": "^1.90.0",
+    "esbuild": "^0.25.0",
     "typescript": "^5.7.2"
   }
 }

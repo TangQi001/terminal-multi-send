@@ -50,22 +50,24 @@ export class Broadcaster {
   ): Promise<boolean> {
     if (options.enableSensitiveCommandGuard && this.containsSensitiveCommand(command, options)) {
       const guarded = await vscode.window.showWarningMessage(
-        "检测到敏感指令关键词，继续发送可能造成不可逆后果。",
+        vscode.l10n.t(
+          "Potentially destructive keyword detected. Continue only if you are sure."
+        ),
         { modal: true },
-        "仍然发送"
+        vscode.l10n.t("Send Anyway")
       );
-      if (guarded !== "仍然发送") {
+      if (guarded !== vscode.l10n.t("Send Anyway")) {
         return false;
       }
     }
 
     if (options.requireConfirmBeforeBroadcast) {
       const confirmed = await vscode.window.showWarningMessage(
-        `确认将命令广播到 ${count} 个终端？`,
+        vscode.l10n.t("Broadcast this command to {0} terminal(s)?", String(count)),
         { modal: true },
-        "发送"
+        vscode.l10n.t("Send")
       );
-      return confirmed === "发送";
+      return confirmed === vscode.l10n.t("Send");
     }
 
     return true;

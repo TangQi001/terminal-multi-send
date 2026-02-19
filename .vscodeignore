@@ -1,0 +1,15 @@
+.vscode/**
+.npm-cache/**
+out/**
+!out/extension.js
+src/**
+scripts/**
+tsconfig.json
+PROJECT.md
+**/*.ts
+**/*.map
+node_modules/**
+!README.md
+!package.nls.json
+!package.nls.zh-cn.json
+!l10n/**

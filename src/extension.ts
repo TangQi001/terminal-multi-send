@@ -27,7 +27,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
       if (targets.length === 0) {
         if (allTerminals.length > 0) {
-          vscode.window.showInformationMessage("未选择终端，已取消广播。");
+          vscode.window.showInformationMessage(
+            vscode.l10n.t("No terminal selected. Broadcast canceled.")
+          );
         }
         return;
       }
@@ -43,7 +45,10 @@ export function activate(context: vscode.ExtensionContext): void {
       }
 
       quickCommands.record(commandText);
-      vscode.window.setStatusBarMessage(`$(zap) 已广播至 ${sentCount} 个终端`, 3000);
+      vscode.window.setStatusBarMessage(
+        vscode.l10n.t("$(zap) Broadcast sent to {0} terminal(s)", String(sentCount)),
+        3000
+      );
     }
   );
 
@@ -57,7 +62,7 @@ export function activate(context: vscode.ExtensionContext): void {
         );
       } catch {
         void vscode.window.showInformationMessage(
-          "已切换到资源管理器，请在侧边栏中展开 Terminal Nexus。"
+          vscode.l10n.t("Switched to Explorer. Expand Terminal Nexus in the sidebar.")
         );
       }
     }

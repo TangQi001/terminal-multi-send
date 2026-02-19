@@ -21,9 +21,12 @@ export class QuickCommands {
     }
 
     const command = await vscode.window.showInputBox({
-      title: "Cursor Terminal Nexus",
-      prompt: `向 ${targetCount} 个终端广播命令`,
-      placeHolder: "例如: npm run dev",
+      title: vscode.l10n.t("Cursor Terminal Nexus"),
+      prompt: vscode.l10n.t(
+        "Broadcast command to {0} terminal(s)",
+        String(targetCount)
+      ),
+      placeHolder: vscode.l10n.t("e.g. npm run dev"),
       value: initial,
       ignoreFocusOut: true
     });
@@ -68,8 +71,11 @@ export class QuickCommands {
     }
 
     const picked = await vscode.window.showQuickPick(items, {
-      title: "Cursor Terminal Nexus",
-      placeHolder: `选择历史/预设命令（将广播到 ${targetCount} 个终端）`,
+      title: vscode.l10n.t("Cursor Terminal Nexus"),
+      placeHolder: vscode.l10n.t(
+        "Select history/preset command (will be broadcast to {0} terminal(s))",
+        String(targetCount)
+      ),
       ignoreFocusOut: true
     });
 
@@ -87,8 +93,8 @@ export class QuickCommands {
   private buildPickItems(history: string[], presets: string[]): CommandPickItem[] {
     const items: CommandPickItem[] = [
       {
-        label: "$(edit) 输入新命令",
-        description: "手动输入并广播",
+        label: vscode.l10n.t("$(edit) Enter New Command"),
+        description: vscode.l10n.t("Type a command manually and broadcast it"),
         kindType: "input"
       }
     ];
@@ -96,7 +102,7 @@ export class QuickCommands {
     for (const command of history) {
       items.push({
         label: `$(history) ${command}`,
-        description: "历史命令",
+        description: vscode.l10n.t("History"),
         kindType: "history",
         command
       });
@@ -109,7 +115,7 @@ export class QuickCommands {
       }
       items.push({
         label: `$(symbol-key) ${command}`,
-        description: "预设命令",
+        description: vscode.l10n.t("Preset"),
         kindType: "preset",
         command
       });

@@ -1,0 +1,20 @@
+{
+  "extension.displayName": "Cursor 终端中枢",
+  "extension.description": "多选集成终端，一次输入，批量广播命令。",
+  "extension.category": "Cursor Terminal Nexus",
+  "extension.config.title": "Cursor Terminal Nexus",
+  "command.broadcast.title": "广播命令",
+  "command.openControlPanel.title": "打开控制面板",
+  "view.controlPanel.name": "Terminal Nexus",
+  "config.autoSelectRegex.description": "按终端名称正则预选终端。",
+  "config.requireConfirmBeforeBroadcast.description": "发送命令前始终弹出确认框。",
+  "config.enableSensitiveCommandGuard.description": "发送潜在危险命令前给出警告。",
+  "config.sensitiveKeywords.description": "敏感命令检测关键词（忽略大小写）。",
+  "config.waveThreshold.description": "当选中终端数超过该阈值时，按分波延迟发送。",
+  "config.waveDelayMs.description": "分波发送模式下，每次发送之间的延迟（毫秒）。",
+  "config.quickCommands.description": "手动输入前可直接选择的预设命令。",
+  "config.enableHistory.description": "启用命令历史，便于快速复用。",
+  "config.maxHistory.description": "全局状态中保留的历史命令最大条数。",
+  "config.autoSendEnabled.description": "启用后，控制面板输入内容会在延迟后自动发送。",
+  "config.autoSendDelayMs.description": "自动发送防抖延迟（毫秒）。"
+}
