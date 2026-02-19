@@ -62,7 +62,7 @@ export function activate(context: vscode.ExtensionContext): void {
         );
       } catch {
         void vscode.window.showInformationMessage(
-          vscode.l10n.t("Switched to Explorer. Expand Terminal Nexus in the sidebar.")
+          vscode.l10n.t("Switched to Explorer. Expand TQ Terminal Nexus in the sidebar.")
         );
       }
     }

@@ -134,7 +134,7 @@ export class TerminalManager implements vscode.Disposable {
       quickPick.ignoreFocusOut = true;
       quickPick.matchOnDescription = true;
       quickPick.matchOnDetail = true;
-      quickPick.title = vscode.l10n.t("Cursor Terminal Nexus");
+      quickPick.title = vscode.l10n.t("TQ Terminal Nexus");
       quickPick.placeholder = vscode.l10n.t(
         "Select target terminals (multi-select supported)"
       );

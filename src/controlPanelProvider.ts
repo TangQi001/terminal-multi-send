@@ -237,7 +237,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
     const csp = `default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';`;
     const locale = /^zh(-|$)/i.test(vscode.env.language) ? "zh-CN" : "en";
     const i18n = {
-      title: vscode.l10n.t("Terminal Nexus"),
+      title: vscode.l10n.t("TQ Terminal Nexus"),
       refresh: vscode.l10n.t("Refresh"),
       selectAll: vscode.l10n.t("Select All"),
       clear: vscode.l10n.t("Clear"),

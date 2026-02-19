@@ -21,7 +21,7 @@ export class QuickCommands {
     }
 
     const command = await vscode.window.showInputBox({
-      title: vscode.l10n.t("Cursor Terminal Nexus"),
+      title: vscode.l10n.t("TQ Terminal Nexus"),
       prompt: vscode.l10n.t(
         "Broadcast command to {0} terminal(s)",
         String(targetCount)
@@ -71,7 +71,7 @@ export class QuickCommands {
     }
 
     const picked = await vscode.window.showQuickPick(items, {
-      title: vscode.l10n.t("Cursor Terminal Nexus"),
+      title: vscode.l10n.t("TQ Terminal Nexus"),
       placeHolder: vscode.l10n.t(
         "Select history/preset command (will be broadcast to {0} terminal(s))",
         String(targetCount)

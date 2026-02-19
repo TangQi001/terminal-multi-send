@@ -1,4 +1,4 @@
-# Cursor Terminal Nexus
+# TQ Terminal Nexus
 
 一个用于 VS Code 的终端广播插件：多选终端，一次输入，批量发送。
 
@@ -18,7 +18,7 @@
 ## 使用方式
 
 1. 在扩展开发模式启动插件（`F5`）。
-2. 命令模式：执行 `Cursor Terminal Nexus: Broadcast Command`。
+2. 命令模式：执行 `TQ Terminal Nexus: Broadcast Command`。
 3. 选择目标终端。
 4. 输入命令并确认发送。
 
@@ -32,8 +32,8 @@
 
 ## 侧边栏面板
 
-1. 执行命令 `Cursor Terminal Nexus: Open Control Panel`（会定位到资源管理器侧栏）。
-2. 在 `Terminal Nexus` 面板里：
+1. 执行命令 `TQ Terminal Nexus: Open Control Panel`（会定位到资源管理器侧栏）。
+2. 在 `TQ Terminal Nexus` 面板里：
    - 勾选/全选终端
    - 输入要发送的内容
    - 点击发送
