@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { isReadyState, TerminalState, TerminalStateManager } from "./terminalStateManager";
 
 export interface BroadcastOptions {
   requireConfirmBeforeBroadcast: boolean;
@@ -9,6 +10,8 @@ export interface BroadcastOptions {
 }
 
 export class Broadcaster {
+  constructor(private readonly terminalStateManager: TerminalStateManager) {}
+
   public async broadcast(
     terminals: vscode.Terminal[],
     command: string,
@@ -19,7 +22,12 @@ export class Broadcaster {
       return 0;
     }
 
-    const shouldContinue = await this.confirmBroadcast(terminals.length, text, options);
+    const candidates = await this.filterBusyTerminals(terminals);
+    if (candidates.length === 0) {
+      return 0;
+    }
+
+    const shouldContinue = await this.confirmBroadcast(candidates.length, text, options);
     if (!shouldContinue) {
       return 0;
     }
@@ -27,26 +35,72 @@ export class Broadcaster {
     const waveThreshold = Math.max(1, options.waveThreshold);
     const waveDelayMs = Math.max(0, options.waveDelayMs);
 
-    if (terminals.length > waveThreshold) {
-      for (let i = 0; i < terminals.length; i += 1) {
+    if (candidates.length > waveThreshold) {
+      for (let i = 0; i < candidates.length; i += 1) {
         this.sendResolvedCommand(
-          terminals[i],
-          this.injectPlaceholders(text, terminals[i], i + 1)
+          candidates[i],
+          this.injectPlaceholders(text, candidates[i], i + 1)
         );
-        if (i < terminals.length - 1 && waveDelayMs > 0) {
+        if (i < candidates.length - 1 && waveDelayMs > 0) {
           await delay(waveDelayMs);
         }
       }
-      return terminals.length;
+      return candidates.length;
     }
 
-    terminals.forEach((terminal, index) => {
+    candidates.forEach((terminal, index) => {
       this.sendResolvedCommand(
         terminal,
         this.injectPlaceholders(text, terminal, index + 1)
       );
     });
-    return terminals.length;
+    return candidates.length;
+  }
+
+  private async filterBusyTerminals(
+    terminals: vscode.Terminal[]
+  ): Promise<vscode.Terminal[]> {
+    const ready: vscode.Terminal[] = [];
+    const busy: Array<{ terminal: vscode.Terminal; state: TerminalState }> = [];
+
+    for (const terminal of terminals) {
+      const state = this.terminalStateManager.getState(terminal);
+      if (isReadyState(state)) {
+        ready.push(terminal);
+      } else {
+        busy.push({ terminal, state });
+      }
+    }
+
+    if (busy.length === 0) {
+      return terminals;
+    }
+
+    const sendReadyLabel = vscode.l10n.t("Send Ready");
+    const forceSendLabel = vscode.l10n.t("Force Send");
+    const picked = await vscode.window.showWarningMessage(
+      vscode.l10n.t(
+        "Some terminals are busy ({0}/{1}). Continue with ready terminals or force send to all?",
+        String(busy.length),
+        String(terminals.length)
+      ),
+      { modal: true, detail: formatBusyTerminalsDetail(busy) },
+      sendReadyLabel,
+      forceSendLabel
+    );
+
+    if (picked === forceSendLabel) {
+      return terminals;
+    }
+    if (picked === sendReadyLabel) {
+      if (ready.length === 0) {
+        void vscode.window.showWarningMessage(
+          vscode.l10n.t("No ready terminal available for broadcast.")
+        );
+      }
+      return ready;
+    }
+    return [];
   }
 
   private async confirmBroadcast(
@@ -105,6 +159,7 @@ export class Broadcaster {
 
   private sendResolvedCommand(terminal: vscode.Terminal, command: string): void {
     const normalized = command.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    this.terminalStateManager.notifyInputSent(terminal);
     terminal.sendText(normalized, false);
     terminal.sendText("", true);
   }
@@ -114,4 +169,32 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function formatBusyTerminalsDetail(
+  busy: Array<{ terminal: vscode.Terminal; state: TerminalState }>
+): string {
+  const preview = busy.slice(0, 5).map((item) => {
+    return `${item.terminal.name} [${toStateText(item.state)}]`;
+  });
+
+  const suffix =
+    busy.length > preview.length
+      ? `, +${busy.length - preview.length}`
+      : "";
+  return preview.join(", ") + suffix;
+}
+
+function toStateText(state: TerminalState): string {
+  switch (state) {
+    case TerminalState.RUNNING_PROGRAM:
+      return "RUNNING_PROGRAM";
+    case TerminalState.CLI_THINKING:
+      return "CLI_THINKING";
+    case TerminalState.CLI_WAITING:
+      return "CLI_WAITING";
+    case TerminalState.IDLE:
+    default:
+      return "IDLE";
+  }
 }

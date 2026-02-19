@@ -121,6 +121,18 @@
           "default": 800,
           "minimum": 200,
           "description": "%config.autoSendDelayMs.description%"
+        },
+        "cursorTerminalNexus.cliPrompts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "(?:^|\\n)\\s*(?:codex|claude(?:\\s+code)?|qwen|gemini)?\\s*(?:>|❯|›|»|\\$)\\s*$",
+            "(?:^|\\n)\\s*(?:You|Input)\\s*:\\s*$",
+            "(?:^|\\n)[^\\n]{0,80}(?:❯|›|»)\\s*$"
+          ],
+          "description": "%config.cliPrompts.description%"
         }
       }
     },

@@ -16,5 +16,6 @@
   "config.enableHistory.description": "Enable command history for quick reuse.",
   "config.maxHistory.description": "Maximum number of history items persisted in global state.",
   "config.autoSendEnabled.description": "When enabled, the control panel auto-sends text after input delay.",
-  "config.autoSendDelayMs.description": "Auto-send debounce delay in milliseconds."
+  "config.autoSendDelayMs.description": "Auto-send debounce delay in milliseconds.",
+  "config.cliPrompts.description": "Regex patterns used to detect interactive CLI prompt output."
 }

@@ -7,12 +7,37 @@ import {
 } from "./config";
 import { QuickCommands } from "./quickCommands";
 import { TerminalDescriptor, TerminalManager } from "./terminalManager";
+import { TerminalState, TerminalStateManager } from "./terminalStateManager";
 
 interface ManagedTerminal {
   key: string;
   terminal: vscode.Terminal;
   name: string;
   processId?: number;
+}
+
+type SortMode =
+  | "custom"
+  | "name-asc"
+  | "name-desc"
+  | "pid-asc"
+  | "pid-desc"
+  | "selected-first";
+
+type GroupMode = "none" | "tool-type";
+
+interface ViewPreferences {
+  sortMode: SortMode;
+  groupMode: GroupMode;
+  customOrder: string[];
+  collapsedGroups: string[];
+}
+
+interface ViewPreferencesPatch {
+  sortMode?: SortMode;
+  groupMode?: GroupMode;
+  customOrder?: string[];
+  collapsedGroups?: string[];
 }
 
 type ViewMessage =
@@ -22,22 +47,36 @@ type ViewMessage =
   | { type: "clearSelection" }
   | { type: "setSelection"; selectedKeys: string[] }
   | { type: "sendCommand"; command: string }
-  | { type: "updateSetting"; key: string; value: string | number | boolean };
+  | { type: "updateSetting"; key: string; value: string | number | boolean }
+  | { type: "updateViewPreferences"; payload: ViewPreferencesPatch };
 
 export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   public static readonly viewType = "cursorTerminalNexus.controlPanel";
+
+  private static readonly viewPreferencesStateKey =
+    "cursorTerminalNexus.controlPanel.viewPreferences";
 
   private readonly disposables: vscode.Disposable[] = [];
   private view?: vscode.WebviewView;
   private terminals: ManagedTerminal[] = [];
   private selectedKeys = new Set<string>();
   private refreshNonce = 0;
+  private viewPreferences: ViewPreferences;
+  private postStateTimer?: NodeJS.Timeout;
 
   constructor(
+    private readonly extensionContext: vscode.ExtensionContext,
     private readonly terminalManager: TerminalManager,
+    private readonly terminalStateManager: TerminalStateManager,
     private readonly quickCommands: QuickCommands,
     private readonly broadcaster: Broadcaster
   ) {
+    this.viewPreferences = sanitizeViewPreferences(
+      this.extensionContext.workspaceState.get(
+        ControlPanelProvider.viewPreferencesStateKey
+      )
+    );
+
     this.disposables.push(
       vscode.window.onDidOpenTerminal(() => {
         void this.refreshTerminals();
@@ -49,14 +88,31 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
         if (event.affectsConfiguration("cursorTerminalNexus")) {
           void this.postState();
         }
+      }),
+      this.terminalStateManager.onDidChangeState(() => {
+        this.schedulePostState();
       })
     );
   }
 
   public dispose(): void {
+    if (this.postStateTimer) {
+      clearTimeout(this.postStateTimer);
+      this.postStateTimer = undefined;
+    }
     for (const disposable of this.disposables) {
       disposable.dispose();
     }
+  }
+
+  private schedulePostState(): void {
+    if (this.postStateTimer) {
+      return;
+    }
+    this.postStateTimer = setTimeout(() => {
+      this.postStateTimer = undefined;
+      void this.postState();
+    }, 80);
   }
 
   public resolveWebviewView(
@@ -112,6 +168,9 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
       case "updateSetting":
         await this.handleSettingUpdate(message.key, message.value);
         return;
+      case "updateViewPreferences":
+        await this.handleViewPreferencesUpdate(message.payload);
+        return;
       default:
         return;
     }
@@ -125,13 +184,28 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
     }
 
     this.terminals = toManagedTerminals(descriptors);
-    const availableKeys = new Set(this.terminals.map((item) => item.key));
+    const terminalKeys = this.terminals.map((item) => item.key);
+    const availableKeys = new Set(terminalKeys);
+
     this.selectedKeys = new Set(
       [...this.selectedKeys].filter((key) => availableKeys.has(key))
     );
 
+    const normalizedPreferences = mergeViewPreferences(
+      this.viewPreferences,
+      undefined,
+      terminalKeys
+    );
+    if (!areViewPreferencesEqual(this.viewPreferences, normalizedPreferences)) {
+      this.viewPreferences = normalizedPreferences;
+      await this.persistViewPreferences();
+    }
+
     if (this.selectedKeys.size === 0) {
-      this.selectedKeys = applyRegexSelection(this.terminals, readNexusConfig().autoSelectRegex);
+      this.selectedKeys = applyRegexSelection(
+        this.terminals,
+        readNexusConfig().autoSelectRegex
+      );
     }
 
     await this.postState();
@@ -148,9 +222,11 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
       terminals: this.terminals.map((item) => ({
         key: item.key,
         name: item.name,
-        processId: item.processId
+        processId: item.processId,
+        state: this.terminalStateManager.getState(item.terminal)
       })),
       selectedKeys: [...this.selectedKeys],
+      viewPreferences: this.viewPreferences,
       settings: {
         autoSelectRegex: config.autoSelectRegex,
         autoSendEnabled: config.autoSendEnabled,
@@ -232,6 +308,31 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
     await this.postState();
   }
 
+  private async handleViewPreferencesUpdate(
+    payload: ViewPreferencesPatch
+  ): Promise<void> {
+    const merged = mergeViewPreferences(
+      this.viewPreferences,
+      payload,
+      this.terminals.map((item) => item.key)
+    );
+
+    if (areViewPreferencesEqual(this.viewPreferences, merged)) {
+      return;
+    }
+
+    this.viewPreferences = merged;
+    await this.persistViewPreferences();
+    await this.postState();
+  }
+
+  private async persistViewPreferences(): Promise<void> {
+    await this.extensionContext.workspaceState.update(
+      ControlPanelProvider.viewPreferencesStateKey,
+      this.viewPreferences
+    );
+  }
+
   private getWebviewHtml(webview: vscode.Webview): string {
     const nonce = getNonce();
     const csp = `default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';`;
@@ -242,6 +343,29 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
       selectAll: vscode.l10n.t("Select All"),
       clear: vscode.l10n.t("Clear"),
       selectedCount: vscode.l10n.t("Selected {0} / {1}"),
+      groupBy: vscode.l10n.t("Group By"),
+      groupNone: vscode.l10n.t("No Grouping"),
+      groupToolType: vscode.l10n.t("Tool Type"),
+      sortBy: vscode.l10n.t("Sort By"),
+      sortCustom: vscode.l10n.t("Custom Order"),
+      sortNameAsc: vscode.l10n.t("Name A-Z"),
+      sortNameDesc: vscode.l10n.t("Name Z-A"),
+      sortPidAsc: vscode.l10n.t("PID Asc"),
+      sortPidDesc: vscode.l10n.t("PID Desc"),
+      sortSelectedFirst: vscode.l10n.t("Selected First"),
+      customDragEnabled: vscode.l10n.t("Drag items to customize order."),
+      customDragDisabled: vscode.l10n.t(
+        "Drag reorder is available only in No Grouping + Custom Order mode."
+      ),
+      collapseGroup: vscode.l10n.t("Collapse group"),
+      expandGroup: vscode.l10n.t("Expand group"),
+      dragHandle: vscode.l10n.t("Drag to reorder"),
+      groupBasic: vscode.l10n.t("Basic Terminal"),
+      groupSecurity: vscode.l10n.t("Security"),
+      groupNetwork: vscode.l10n.t("Network"),
+      groupDevOps: vscode.l10n.t("DevOps"),
+      groupData: vscode.l10n.t("Data"),
+      groupOther: vscode.l10n.t("Other"),
       command: vscode.l10n.t("Command"),
       sendShortcut: vscode.l10n.t("Ctrl/Cmd + Enter to send"),
       commandInputPlaceholder: vscode.l10n.t("Enter text or command to broadcast"),
@@ -261,7 +385,13 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
       waveDelay: vscode.l10n.t("Wave Delay"),
       noTerminalsAvailable: vscode.l10n.t("No terminals available."),
       pidWithValue: vscode.l10n.t("PID: {0}"),
-      pidUnknown: vscode.l10n.t("PID: Unknown")
+      pidUnknown: vscode.l10n.t("PID: Unknown"),
+      stateIdle: vscode.l10n.t("Idle"),
+      stateRunningProgram: vscode.l10n.t("Running Program"),
+      stateCliWaiting: vscode.l10n.t("CLI Waiting"),
+      stateCliThinking: vscode.l10n.t("CLI Thinking"),
+      statusReady: vscode.l10n.t("Ready"),
+      statusBusy: vscode.l10n.t("Busy")
     };
     const i18nJson = JSON.stringify(i18n);
 
@@ -278,6 +408,9 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
       --muted: var(--vscode-descriptionForeground);
       --border: var(--vscode-panel-border);
       --bg-soft: color-mix(in srgb, var(--vscode-editor-background) 90%, var(--vscode-foreground) 10%);
+      --row-hover: color-mix(in srgb, var(--vscode-list-hoverBackground) 80%, transparent);
+      --group-bg: color-mix(in srgb, var(--vscode-editor-background) 82%, var(--vscode-foreground) 18%);
+      --drop-border: var(--vscode-focusBorder);
     }
     body {
       margin: 0;
@@ -307,7 +440,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
     }
     .label {
       color: var(--muted);
-      min-width: 90px;
+      min-width: 68px;
     }
     button {
       border: 1px solid var(--border);
@@ -322,7 +455,11 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
       background: var(--vscode-button-background);
       color: var(--vscode-button-foreground);
     }
-    input[type="text"], input[type="number"], textarea {
+    .sub {
+      color: var(--muted);
+      font-size: 11px;
+    }
+    input[type="text"], input[type="number"], textarea, select {
       width: 100%;
       box-sizing: border-box;
       border: 1px solid var(--border);
@@ -332,13 +469,18 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
       padding: 5px 7px;
       font-size: 12px;
     }
+    select {
+      cursor: pointer;
+      min-width: 90px;
+      width: auto;
+    }
     textarea {
       min-height: 72px;
       resize: vertical;
       font-family: var(--vscode-editor-font-family, monospace);
     }
     .terminal-list {
-      max-height: 220px;
+      max-height: 230px;
       overflow: auto;
       border: 1px solid var(--border);
       border-radius: 6px;
@@ -349,15 +491,122 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
       display: flex;
       gap: 6px;
       align-items: center;
-      padding: 2px 0;
+      padding: 3px 4px;
+      border-radius: 4px;
+      border-top: 1px solid transparent;
+      border-bottom: 1px solid transparent;
+    }
+    .terminal-item:hover {
+      background: var(--row-hover);
+    }
+    .terminal-item.drag-enabled {
+      cursor: default;
+    }
+    .terminal-item.dragging {
+      opacity: 0.6;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+      background: var(--row-hover);
+    }
+    .terminal-item.drop-before {
+      border-top-color: var(--drop-border);
+    }
+    .terminal-item.drop-after {
+      border-bottom-color: var(--drop-border);
+    }
+    .drag-handle {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 14px;
+      color: var(--muted);
+      cursor: grab;
+      user-select: none;
+      flex-shrink: 0;
+    }
+    .drag-handle.disabled {
+      opacity: 0.2;
+      cursor: default;
+    }
+    .terminal-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .terminal-status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      flex-shrink: 0;
+      border: 1px solid color-mix(in srgb, var(--vscode-foreground) 20%, transparent);
+    }
+    .terminal-status-dot.ready {
+      background: var(--vscode-terminal-ansiGreen, #3fb950);
+    }
+    .terminal-status-dot.busy {
+      background: var(--vscode-terminal-ansiYellow, #d29922);
     }
     .terminal-meta {
       color: var(--muted);
       font-size: 11px;
+      flex-shrink: 0;
     }
-    .sub {
+    .terminal-state-label {
       color: var(--muted);
       font-size: 11px;
+      margin-left: auto;
+      flex-shrink: 0;
+    }
+    .group {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      margin-bottom: 6px;
+      overflow: hidden;
+    }
+    .group:last-child {
+      margin-bottom: 0;
+    }
+    .group-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 6px;
+      background: var(--group-bg);
+      border-bottom: 1px solid var(--border);
+    }
+    .group.collapsed .group-header {
+      border-bottom: none;
+    }
+    .group-title {
+      font-weight: 600;
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .group-toggle {
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      width: 16px;
+      padding: 0;
+      line-height: 1;
+    }
+    .group-items {
+      padding: 4px 2px;
+    }
+    .group.collapsed .group-items {
+      display: none;
+    }
+    .sort-row {
+      align-items: flex-start;
+    }
+    .sort-field {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      min-width: 0;
+      flex: 1;
     }
   </style>
 </head>
@@ -369,6 +618,27 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
       <button id="clearBtn">${i18n.clear}</button>
       <span id="selectedCount" class="sub"></span>
     </div>
+    <div class="row sort-row">
+      <div class="sort-field">
+        <span class="label">${i18n.groupBy}</span>
+        <select id="groupModeSelect">
+          <option value="none">${i18n.groupNone}</option>
+          <option value="tool-type">${i18n.groupToolType}</option>
+        </select>
+      </div>
+      <div class="sort-field">
+        <span class="label">${i18n.sortBy}</span>
+        <select id="sortModeSelect">
+          <option value="custom">${i18n.sortCustom}</option>
+          <option value="name-asc">${i18n.sortNameAsc}</option>
+          <option value="name-desc">${i18n.sortNameDesc}</option>
+          <option value="pid-asc">${i18n.sortPidAsc}</option>
+          <option value="pid-desc">${i18n.sortPidDesc}</option>
+          <option value="selected-first">${i18n.sortSelectedFirst}</option>
+        </select>
+      </div>
+    </div>
+    <div id="dragHint" class="sub"></div>
     <div id="terminalList" class="terminal-list"></div>
   </div>
 
@@ -422,9 +692,18 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
   <script nonce="${nonce}">
     const i18n = ${i18nJson};
     const vscode = acquireVsCodeApi();
+
+    const GROUP_ORDER = ["basic", "security", "network", "devops", "data", "other"];
+
     let state = {
       terminals: [],
       selectedKeys: [],
+      viewPreferences: {
+        sortMode: "custom",
+        groupMode: "none",
+        customOrder: [],
+        collapsedGroups: []
+      },
       settings: {
         autoSelectRegex: "",
         autoSendEnabled: false,
@@ -435,8 +714,16 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
         waveDelayMs: 20
       }
     };
+
     let autoSendTimer;
     let lastAutoSent = "";
+    let draggingKey = "";
+    let dragHandleKey = "";
+
+    const collator = new Intl.Collator(document.documentElement.lang || undefined, {
+      numeric: true,
+      sensitivity: "base"
+    });
 
     const terminalList = document.getElementById("terminalList");
     const selectedCount = document.getElementById("selectedCount");
@@ -445,6 +732,9 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
     const selectAllBtn = document.getElementById("selectAllBtn");
     const clearBtn = document.getElementById("clearBtn");
     const sendBtn = document.getElementById("sendBtn");
+    const groupModeSelect = document.getElementById("groupModeSelect");
+    const sortModeSelect = document.getElementById("sortModeSelect");
+    const dragHint = document.getElementById("dragHint");
 
     const autoSendEnabled = document.getElementById("autoSendEnabled");
     const autoSendDelayMs = document.getElementById("autoSendDelayMs");
@@ -455,7 +745,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
     const waveDelayMs = document.getElementById("waveDelayMs");
 
     function format(message, ...args) {
-      return message.replace(/\\{(\\d+)\\}/g, (_, index) => {
+      return message.replace(/\{(\d+)\}/g, (_, index) => {
         const value = args[Number(index)];
         return value === undefined ? "" : String(value);
       });
@@ -463,6 +753,17 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
 
     function post(message) {
       vscode.postMessage(message);
+    }
+
+    function saveViewPreferences(patch) {
+      post({ type: "updateViewPreferences", payload: patch });
+    }
+
+    function isCustomDragEnabled() {
+      return (
+        state.viewPreferences.sortMode === "custom" &&
+        state.viewPreferences.groupMode === "none"
+      );
     }
 
     function getSelectedKeysFromDom() {
@@ -473,15 +774,435 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
           selected.push(checkbox.getAttribute("data-terminal-key"));
         }
       });
-      return selected;
+      return selected.filter((item) => Boolean(item));
     }
 
     function syncSelectionFromDom() {
       post({ type: "setSelection", selectedKeys: getSelectedKeysFromDom() });
     }
 
+    function compareName(a, b) {
+      return collator.compare(a.name, b.name);
+    }
+
+    function comparePid(a, b) {
+      const aPid = Number.isFinite(a.processId) ? a.processId : Number.MAX_SAFE_INTEGER;
+      const bPid = Number.isFinite(b.processId) ? b.processId : Number.MAX_SAFE_INTEGER;
+      if (aPid !== bPid) {
+        return aPid - bPid;
+      }
+      return compareName(a, b);
+    }
+
+    function getNormalizedCustomOrder() {
+      const keys = state.terminals.map((item) => item.key);
+      const orderSet = new Set();
+      const normalized = [];
+      state.viewPreferences.customOrder.forEach((key) => {
+        if (keys.includes(key) && !orderSet.has(key)) {
+          orderSet.add(key);
+          normalized.push(key);
+        }
+      });
+      keys.forEach((key) => {
+        if (!orderSet.has(key)) {
+          orderSet.add(key);
+          normalized.push(key);
+        }
+      });
+      return normalized;
+    }
+
+    function getSortedTerminals() {
+      const selected = new Set(state.selectedKeys);
+      const terminals = [...state.terminals];
+      const sortMode = state.viewPreferences.sortMode;
+
+      if (sortMode === "custom") {
+        const order = getNormalizedCustomOrder();
+        const index = new Map(order.map((key, position) => [key, position]));
+        terminals.sort((a, b) => {
+          const aIndex = index.get(a.key) ?? Number.MAX_SAFE_INTEGER;
+          const bIndex = index.get(b.key) ?? Number.MAX_SAFE_INTEGER;
+          if (aIndex !== bIndex) {
+            return aIndex - bIndex;
+          }
+          return compareName(a, b);
+        });
+        return terminals;
+      }
+
+      if (sortMode === "name-asc") {
+        terminals.sort(compareName);
+        return terminals;
+      }
+
+      if (sortMode === "name-desc") {
+        terminals.sort((a, b) => compareName(b, a));
+        return terminals;
+      }
+
+      if (sortMode === "pid-asc") {
+        terminals.sort(comparePid);
+        return terminals;
+      }
+
+      if (sortMode === "pid-desc") {
+        terminals.sort((a, b) => comparePid(b, a));
+        return terminals;
+      }
+
+      terminals.sort((a, b) => {
+        const aSelected = selected.has(a.key) ? 1 : 0;
+        const bSelected = selected.has(b.key) ? 1 : 0;
+        if (aSelected !== bSelected) {
+          return bSelected - aSelected;
+        }
+        return compareName(a, b);
+      });
+      return terminals;
+    }
+
+    function inferGroupId(name) {
+      const raw = String(name || "").toLowerCase();
+
+      if (/(security|sec|crypto|crypt|hash|jwt|scan|audit|pentest|vuln|ssh|gpg|openssl|nmap|sqlmap|burp|metasploit)/.test(raw)) {
+        return "security";
+      }
+
+      if (/(network|net|http|https|dns|proxy|socket|tcp|udp|ping|curl|wget|wireshark)/.test(raw)) {
+        return "network";
+      }
+
+      if (/(devops|docker|k8s|kubernetes|helm|terraform|ansible|jenkins|ci|cd|deploy|aws|gcp|azure)/.test(raw)) {
+        return "devops";
+      }
+
+      if (/(data|db|mysql|postgres|redis|mongodb|sqlite|elasticsearch|kafka)/.test(raw)) {
+        return "data";
+      }
+
+      if (/(bash|zsh|sh|pwsh|powershell|cmd|terminal|shell)/.test(raw)) {
+        return "basic";
+      }
+
+      return "other";
+    }
+
+    function groupLabelById(groupId) {
+      if (groupId === "basic") {
+        return i18n.groupBasic;
+      }
+      if (groupId === "security") {
+        return i18n.groupSecurity;
+      }
+      if (groupId === "network") {
+        return i18n.groupNetwork;
+      }
+      if (groupId === "devops") {
+        return i18n.groupDevOps;
+      }
+      if (groupId === "data") {
+        return i18n.groupData;
+      }
+      return i18n.groupOther;
+    }
+
+    function getGroupedTerminals(sortedTerminals) {
+      const groups = new Map();
+      sortedTerminals.forEach((terminal) => {
+        const groupId = inferGroupId(terminal.name);
+        const current = groups.get(groupId);
+        if (current) {
+          current.terminals.push(terminal);
+        } else {
+          groups.set(groupId, {
+            id: groupId,
+            label: groupLabelById(groupId),
+            terminals: [terminal]
+          });
+        }
+      });
+
+      const result = [...groups.values()];
+      result.sort((a, b) => {
+        const aIndex = GROUP_ORDER.indexOf(a.id);
+        const bIndex = GROUP_ORDER.indexOf(b.id);
+        if (aIndex !== bIndex) {
+          return aIndex - bIndex;
+        }
+        return collator.compare(a.label, b.label);
+      });
+      return result;
+    }
+
+    function reorderCustomOrder(sourceKey, targetKey, placeAfter) {
+      if (!sourceKey || !targetKey || sourceKey === targetKey) {
+        return null;
+      }
+
+      const order = getNormalizedCustomOrder();
+      const sourceIndex = order.indexOf(sourceKey);
+      const targetIndex = order.indexOf(targetKey);
+      if (sourceIndex < 0 || targetIndex < 0) {
+        return null;
+      }
+
+      order.splice(sourceIndex, 1);
+      const nextTargetIndex = order.indexOf(targetKey);
+      const insertAt = placeAfter ? nextTargetIndex + 1 : nextTargetIndex;
+      order.splice(insertAt, 0, sourceKey);
+      return order;
+    }
+
+    function clearDropMarkers() {
+      terminalList
+        .querySelectorAll(".drop-before, .drop-after")
+        .forEach((item) => {
+          item.classList.remove("drop-before", "drop-after");
+        });
+    }
+
+    function getTerminalStateInfo(rawState) {
+      if (rawState === "${TerminalState.CLI_WAITING}") {
+        return {
+          ready: true,
+          stateLabel: i18n.stateCliWaiting,
+          badge: i18n.statusReady
+        };
+      }
+      if (rawState === "${TerminalState.RUNNING_PROGRAM}") {
+        return {
+          ready: false,
+          stateLabel: i18n.stateRunningProgram,
+          badge: i18n.statusBusy
+        };
+      }
+      if (rawState === "${TerminalState.CLI_THINKING}") {
+        return {
+          ready: false,
+          stateLabel: i18n.stateCliThinking,
+          badge: i18n.statusBusy
+        };
+      }
+      return {
+        ready: true,
+        stateLabel: i18n.stateIdle,
+        badge: i18n.statusReady
+      };
+    }
+
+    function createTerminalItem(terminal, selected, options) {
+      const item = document.createElement("div");
+      item.className = "terminal-item";
+      const terminalState = getTerminalStateInfo(terminal.state);
+
+      const handle = document.createElement("span");
+      handle.className = options.dragEnabled ? "drag-handle" : "drag-handle disabled";
+      handle.textContent = "≡";
+      handle.title = i18n.dragHandle;
+      if (options.dragEnabled) {
+        handle.addEventListener("pointerdown", () => {
+          dragHandleKey = terminal.key;
+        });
+      }
+
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.setAttribute("data-terminal-key", terminal.key);
+      checkbox.checked = selected.has(terminal.key);
+      checkbox.addEventListener("change", syncSelectionFromDom);
+
+      const name = document.createElement("span");
+      name.className = "terminal-name";
+      name.textContent = terminal.name;
+
+      const statusDot = document.createElement("span");
+      statusDot.className = terminalState.ready
+        ? "terminal-status-dot ready"
+        : "terminal-status-dot busy";
+      statusDot.title = terminalState.badge;
+
+      const meta = document.createElement("span");
+      meta.className = "terminal-meta";
+      meta.textContent = terminal.processId !== undefined
+        ? "(" + format(i18n.pidWithValue, terminal.processId) + ")"
+        : "(" + i18n.pidUnknown + ")";
+
+      const stateLabel = document.createElement("span");
+      stateLabel.className = "terminal-state-label";
+      stateLabel.textContent = terminalState.stateLabel;
+
+      item.appendChild(handle);
+      item.appendChild(checkbox);
+      item.appendChild(statusDot);
+      item.appendChild(name);
+      item.appendChild(meta);
+      item.appendChild(stateLabel);
+
+      if (!options.dragEnabled) {
+        return item;
+      }
+
+      item.classList.add("drag-enabled");
+      item.draggable = true;
+
+      item.addEventListener("dragstart", (event) => {
+        if (dragHandleKey !== terminal.key) {
+          event.preventDefault();
+          return;
+        }
+        draggingKey = terminal.key;
+        item.classList.add("dragging");
+        if (event.dataTransfer) {
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", terminal.key);
+        }
+      });
+
+      item.addEventListener("dragover", (event) => {
+        if (!draggingKey || draggingKey === terminal.key) {
+          return;
+        }
+        event.preventDefault();
+        const rect = item.getBoundingClientRect();
+        const placeAfter = event.clientY - rect.top > rect.height / 2;
+        clearDropMarkers();
+        item.classList.add(placeAfter ? "drop-after" : "drop-before");
+      });
+
+      item.addEventListener("drop", (event) => {
+        event.preventDefault();
+        if (!draggingKey || draggingKey === terminal.key) {
+          return;
+        }
+        const rect = item.getBoundingClientRect();
+        const placeAfter = event.clientY - rect.top > rect.height / 2;
+        const nextOrder = reorderCustomOrder(draggingKey, terminal.key, placeAfter);
+        if (!nextOrder) {
+          return;
+        }
+
+        state.viewPreferences.customOrder = nextOrder;
+        draggingKey = "";
+        dragHandleKey = "";
+        clearDropMarkers();
+        renderTerminals();
+        saveViewPreferences({ customOrder: nextOrder });
+      });
+
+      item.addEventListener("dragend", () => {
+        draggingKey = "";
+        dragHandleKey = "";
+        item.classList.remove("dragging");
+        clearDropMarkers();
+      });
+
+      return item;
+    }
+
+    function toggleGroupSelection(groupTerminals, checked) {
+      const selected = new Set(state.selectedKeys);
+      groupTerminals.forEach((terminal) => {
+        if (checked) {
+          selected.add(terminal.key);
+        } else {
+          selected.delete(terminal.key);
+        }
+      });
+      post({ type: "setSelection", selectedKeys: [...selected] });
+    }
+
+    function toggleGroupCollapsed(groupId) {
+      const collapsed = new Set(state.viewPreferences.collapsedGroups);
+      if (collapsed.has(groupId)) {
+        collapsed.delete(groupId);
+      } else {
+        collapsed.add(groupId);
+      }
+      saveViewPreferences({ collapsedGroups: [...collapsed] });
+    }
+
+    function renderGroupedTerminals(sortedTerminals, selected) {
+      const collapsed = new Set(state.viewPreferences.collapsedGroups);
+      const groups = getGroupedTerminals(sortedTerminals);
+
+      groups.forEach((group) => {
+        const wrapper = document.createElement("div");
+        wrapper.className = "group";
+
+        if (collapsed.has(group.id)) {
+          wrapper.classList.add("collapsed");
+        }
+
+        const header = document.createElement("div");
+        header.className = "group-header";
+
+        const toggle = document.createElement("button");
+        toggle.className = "group-toggle";
+        toggle.type = "button";
+        const isCollapsed = collapsed.has(group.id);
+        toggle.textContent = isCollapsed ? "▸" : "▾";
+        toggle.title = isCollapsed ? i18n.expandGroup : i18n.collapseGroup;
+        toggle.addEventListener("click", () => {
+          toggleGroupCollapsed(group.id);
+        });
+
+        const groupCheckbox = document.createElement("input");
+        groupCheckbox.type = "checkbox";
+        const selectedInGroup = group.terminals.filter((item) => selected.has(item.key)).length;
+        groupCheckbox.checked = selectedInGroup === group.terminals.length && group.terminals.length > 0;
+        groupCheckbox.indeterminate =
+          selectedInGroup > 0 && selectedInGroup < group.terminals.length;
+        groupCheckbox.addEventListener("change", () => {
+          toggleGroupSelection(group.terminals, groupCheckbox.checked);
+        });
+
+        const title = document.createElement("span");
+        title.className = "group-title";
+        title.textContent =
+          group.label +
+          " (" +
+          selectedInGroup +
+          "/" +
+          group.terminals.length +
+          ")";
+
+        header.appendChild(toggle);
+        header.appendChild(groupCheckbox);
+        header.appendChild(title);
+
+        const items = document.createElement("div");
+        items.className = "group-items";
+
+        group.terminals.forEach((terminal) => {
+          items.appendChild(
+            createTerminalItem(terminal, selected, {
+              dragEnabled: false
+            })
+          );
+        });
+
+        wrapper.appendChild(header);
+        wrapper.appendChild(items);
+        terminalList.appendChild(wrapper);
+      });
+    }
+
+    function renderFlatTerminals(sortedTerminals, selected) {
+      const dragEnabled = isCustomDragEnabled();
+      sortedTerminals.forEach((terminal) => {
+        terminalList.appendChild(
+          createTerminalItem(terminal, selected, {
+            dragEnabled
+          })
+        );
+      });
+    }
+
     function renderTerminals() {
       const selected = new Set(state.selectedKeys);
+      const sortedTerminals = getSortedTerminals();
       terminalList.innerHTML = "";
 
       if (state.terminals.length === 0) {
@@ -490,39 +1211,25 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
         empty.textContent = i18n.noTerminalsAvailable;
         terminalList.appendChild(empty);
         selectedCount.textContent = format(i18n.selectedCount, 0, 0);
+        dragHint.textContent = "";
         return;
       }
 
-      state.terminals.forEach((terminal) => {
-        const wrapper = document.createElement("label");
-        wrapper.className = "terminal-item";
-
-        const checkbox = document.createElement("input");
-        checkbox.type = "checkbox";
-        checkbox.setAttribute("data-terminal-key", terminal.key);
-        checkbox.checked = selected.has(terminal.key);
-        checkbox.addEventListener("change", syncSelectionFromDom);
-
-        const text = document.createElement("span");
-        text.textContent = terminal.name;
-
-        const meta = document.createElement("span");
-        meta.className = "terminal-meta";
-        meta.textContent = terminal.processId
-          ? "(" + format(i18n.pidWithValue, terminal.processId) + ")"
-          : "(" + i18n.pidUnknown + ")";
-
-        wrapper.appendChild(checkbox);
-        wrapper.appendChild(text);
-        wrapper.appendChild(meta);
-        terminalList.appendChild(wrapper);
-      });
+      if (state.viewPreferences.groupMode === "tool-type") {
+        renderGroupedTerminals(sortedTerminals, selected);
+      } else {
+        renderFlatTerminals(sortedTerminals, selected);
+      }
 
       selectedCount.textContent = format(
         i18n.selectedCount,
         state.selectedKeys.length,
         state.terminals.length
       );
+
+      dragHint.textContent = isCustomDragEnabled()
+        ? i18n.customDragEnabled
+        : i18n.customDragDisabled;
     }
 
     function renderSettings() {
@@ -535,7 +1242,13 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
       waveDelayMs.value = String(state.settings.waveDelayMs);
     }
 
+    function renderViewPreferences() {
+      groupModeSelect.value = state.viewPreferences.groupMode;
+      sortModeSelect.value = state.viewPreferences.sortMode;
+    }
+
     function render() {
+      renderViewPreferences();
       renderTerminals();
       renderSettings();
     }
@@ -574,6 +1287,15 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
     selectAllBtn.addEventListener("click", () => post({ type: "selectAll" }));
     clearBtn.addEventListener("click", () => post({ type: "clearSelection" }));
     sendBtn.addEventListener("click", sendCurrentText);
+
+    groupModeSelect.addEventListener("change", () => {
+      saveViewPreferences({ groupMode: groupModeSelect.value });
+    });
+
+    sortModeSelect.addEventListener("change", () => {
+      saveViewPreferences({ sortMode: sortModeSelect.value });
+    });
+
     commandInput.addEventListener("input", scheduleAutoSend);
     commandInput.addEventListener("keydown", (event) => {
       if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
@@ -727,6 +1449,141 @@ function normalizeSettingValue(
     default:
       return undefined;
   }
+}
+
+function createDefaultViewPreferences(): ViewPreferences {
+  return {
+    sortMode: "custom",
+    groupMode: "none",
+    customOrder: [],
+    collapsedGroups: []
+  };
+}
+
+function sanitizeViewPreferences(rawValue: unknown): ViewPreferences {
+  const defaults = createDefaultViewPreferences();
+
+  if (!rawValue || typeof rawValue !== "object") {
+    return defaults;
+  }
+
+  const source = rawValue as Partial<ViewPreferences>;
+  const sortMode = isSortMode(source.sortMode) ? source.sortMode : defaults.sortMode;
+  const groupMode = isGroupMode(source.groupMode)
+    ? source.groupMode
+    : defaults.groupMode;
+
+  return {
+    sortMode,
+    groupMode,
+    customOrder: toStringArray(source.customOrder),
+    collapsedGroups: toStringArray(source.collapsedGroups)
+  };
+}
+
+function mergeViewPreferences(
+  current: ViewPreferences,
+  patch: ViewPreferencesPatch | undefined,
+  terminalKeys: string[]
+): ViewPreferences {
+  const base = sanitizeViewPreferences(current);
+
+  const sortMode = isSortMode(patch?.sortMode) ? patch.sortMode : base.sortMode;
+  const groupMode = isGroupMode(patch?.groupMode) ? patch.groupMode : base.groupMode;
+
+  const nextCustomOrder = normalizeCustomOrder(
+    patch?.customOrder ?? base.customOrder,
+    terminalKeys
+  );
+  const nextCollapsedGroups = normalizeCollapsedGroups(
+    patch?.collapsedGroups ?? base.collapsedGroups
+  );
+
+  return {
+    sortMode,
+    groupMode,
+    customOrder: nextCustomOrder,
+    collapsedGroups: nextCollapsedGroups
+  };
+}
+
+function normalizeCustomOrder(order: string[], terminalKeys: string[]): string[] {
+  const keySet = new Set(terminalKeys);
+  const added = new Set<string>();
+  const normalized: string[] = [];
+
+  for (const key of order) {
+    if (!keySet.has(key) || added.has(key)) {
+      continue;
+    }
+    added.add(key);
+    normalized.push(key);
+  }
+
+  for (const key of terminalKeys) {
+    if (!added.has(key)) {
+      added.add(key);
+      normalized.push(key);
+    }
+  }
+
+  return normalized;
+}
+
+function normalizeCollapsedGroups(groups: string[]): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const item of groups) {
+    if (seen.has(item)) {
+      continue;
+    }
+    seen.add(item);
+    normalized.push(item);
+  }
+  return normalized;
+}
+
+function toStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+function areViewPreferencesEqual(a: ViewPreferences, b: ViewPreferences): boolean {
+  return (
+    a.sortMode === b.sortMode &&
+    a.groupMode === b.groupMode &&
+    areStringArraysEqual(a.customOrder, b.customOrder) &&
+    areStringArraysEqual(a.collapsedGroups, b.collapsedGroups)
+  );
+}
+
+function areStringArraysEqual(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isSortMode(value: unknown): value is SortMode {
+  return (
+    value === "custom" ||
+    value === "name-asc" ||
+    value === "name-desc" ||
+    value === "pid-asc" ||
+    value === "pid-desc" ||
+    value === "selected-first"
+  );
+}
+
+function isGroupMode(value: unknown): value is GroupMode {
+  return value === "none" || value === "tool-type";
 }
 
 function getNonce(): string {

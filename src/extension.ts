@@ -4,13 +4,17 @@ import { readNexusConfig } from "./config";
 import { ControlPanelProvider } from "./controlPanelProvider";
 import { QuickCommands } from "./quickCommands";
 import { TerminalManager } from "./terminalManager";
+import { TerminalStateManager } from "./terminalStateManager";
 
 export function activate(context: vscode.ExtensionContext): void {
   const terminalManager = new TerminalManager();
+  const terminalStateManager = new TerminalStateManager();
   const quickCommands = new QuickCommands(context);
-  const broadcaster = new Broadcaster();
+  const broadcaster = new Broadcaster(terminalStateManager);
   const controlPanelProvider = new ControlPanelProvider(
+    context,
     terminalManager,
+    terminalStateManager,
     quickCommands,
     broadcaster
   );
@@ -83,6 +87,7 @@ export function activate(context: vscode.ExtensionContext): void {
     openControlPanelCommand,
     viewRegistration,
     terminalManager,
+    terminalStateManager,
     controlPanelProvider
   );
 }

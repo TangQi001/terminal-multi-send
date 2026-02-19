@@ -16,5 +16,6 @@
   "config.enableHistory.description": "启用命令历史，便于快速复用。",
   "config.maxHistory.description": "全局状态中保留的历史命令最大条数。",
   "config.autoSendEnabled.description": "启用后，控制面板输入内容会在延迟后自动发送。",
-  "config.autoSendDelayMs.description": "自动发送防抖延迟（毫秒）。"
+  "config.autoSendDelayMs.description": "自动发送防抖延迟（毫秒）。",
+  "config.cliPrompts.description": "用于识别交互式 CLI 提示符输出的正则模式列表。"
 }
