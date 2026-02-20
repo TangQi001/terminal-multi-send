@@ -2,7 +2,7 @@
   "name": "cursor-terminal-nexus",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.0.2",
+  "version": "0.0.4",
   "publisher": "local",
   "license": "MIT",
   "repository": {
