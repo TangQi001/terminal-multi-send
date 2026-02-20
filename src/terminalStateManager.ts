@@ -90,6 +90,11 @@ export class TerminalStateManager implements vscode.Disposable {
     return isReadyState(this.getState(terminal));
   }
 
+  public isInteractiveCliSession(terminal: vscode.Terminal): boolean {
+    const tracker = this.trackers.get(terminal);
+    return tracker?.isInteractiveCli ?? false;
+  }
+
   public notifyInputSent(terminal: vscode.Terminal): void {
     const tracker = this.getOrCreateTracker(terminal);
     if (

@@ -9,27 +9,31 @@ A VS Code extension for multi-terminal broadcasting: type once and send to multi
 - Multi-terminal selection and broadcasting:
   - Command mode with multi-select `QuickPick`
   - Auto-pass through when only one terminal is available
-- Command input flow:
-  - Manual input
-  - Command history
-  - Preset commands (`quickCommands`)
+- Sidebar control panel with three tabs:
+  - `Send Now`: one-shot send (`Ctrl/Cmd + Enter` or button)
+  - `Polling`: periodic command broadcast with start/stop controls
+  - `Task Chain`: multi-step script execution with state-aware waiting
+- Task-chain directives:
+  - `{delay: 2000}`
+  - `{wait_ready: 5000}` / `{wait_idle: 5000}`
+  - Optional timeout: `{wait_ready: 5000, timeout: 120000}`
+  - Plain syntax also supported: `wait_ready:5000`, `delay:2000`
 - Placeholder injection:
   - `{index}`: send sequence index (starts from 1)
   - `{name}`: terminal name
   - `{name:quoted}`: terminal name wrapped with escaped double quotes
+- State-aware automation:
+  - Terminal states: `IDLE`, `RUNNING_PROGRAM`, `CLI_WAITING`, `CLI_THINKING`
+  - Chain step can wait until all selected terminals return to ready state
+  - Polling and chain runs stop safely on target close/error
 - Safety and stability:
   - Sensitive keyword guard (with secondary confirmation)
   - Optional "confirm before send"
   - Wave sending with delay when terminal count exceeds threshold
-- Sidebar control panel (Webview):
-  - Select terminals, select all, clear, refresh
-  - Grouping (by tool type) and sorting (name/PID/selected-first/custom)
-  - Drag-and-drop reordering in custom sort mode
-  - Auto-send after input (debounced)
-  - Update core settings directly in the panel
-- Internationalization:
-  - English by default
-  - `zh-CN` localization
+  - Interactive CLI-aware submit path for Codex/Claude/Qwen/Gemini style terminals
+- Settings and i18n:
+  - In-panel settings (top-right gear button)
+  - Panel language switch (`English` / `zh-CN`)
 
 ## Install and Run
 
@@ -65,8 +69,10 @@ Default keybinding: `Alt+Shift+B`
 2. Open `TQ Terminal Nexus` view in Explorer sidebar
 3. In the panel:
    - Manage terminal selection
-   - Enter text/command (`Ctrl/Cmd + Enter` to send quickly)
-   - Configure auto-send, wave parameters, and safety options
+   - `Send Now`: enter text/command and send immediately
+   - `Polling`: configure interval seconds and start/stop loop sending
+   - `Task Chain`: run multi-line script with delay/wait directives
+   - Open top-right gear for settings and panel language
 
 ## Configuration
 
@@ -83,8 +89,7 @@ Search `cursorTerminalNexus` in VS Code `Settings`:
 | `cursorTerminalNexus.quickCommands` | `[]` | Preset command list |
 | `cursorTerminalNexus.enableHistory` | `true` | Enable command history |
 | `cursorTerminalNexus.maxHistory` | `30` | Maximum stored history entries |
-| `cursorTerminalNexus.autoSendEnabled` | `false` | Auto-send after input in control panel |
-| `cursorTerminalNexus.autoSendDelayMs` | `800` | Debounce delay for auto-send (ms, minimum 200) |
+| `cursorTerminalNexus.cliPrompts` | built-in regex list | Prompt patterns used to detect interactive CLI waiting state |
 
 ## Placeholder Example
 
@@ -96,14 +101,27 @@ echo terminal={name} idx={index} safe={name:quoted}
 
 Values are resolved per terminal at send time.
 
+## Task Chain Example
+
+```text
+# Step 1: start session
+codex
+{wait_ready: 5000, timeout: 180000}
+# Step 2: send command
+please summarize current repo status
+{wait_ready: 3000}
+```
+
 ## Project Structure
 
 ```text
 src/
   extension.ts            # Extension entry and command registration
   terminalManager.ts      # Terminal discovery, PID resolution, QuickPick multi-select
+  terminalStateManager.ts # Terminal runtime state tracking (ready/thinking/running)
   quickCommands.ts        # History and preset command handling
   broadcaster.ts          # Safety checks, placeholder injection, wave sending
+  taskAutomationManager.ts# Polling and task-chain orchestration
   controlPanelProvider.ts # Sidebar control panel (Webview)
   config.ts               # Configuration read/update helpers
 scripts/

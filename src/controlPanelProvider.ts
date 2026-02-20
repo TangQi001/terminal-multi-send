@@ -1,4 +1,6 @@
 import * as vscode from "vscode";
+import * as fs from "fs";
+import * as path from "path";
 import { Broadcaster } from "./broadcaster";
 import {
   EditableSettingKey,
@@ -6,6 +8,7 @@ import {
   updateNexusSetting
 } from "./config";
 import { QuickCommands } from "./quickCommands";
+import { AutomationStatus, TaskAutomationManager } from "./taskAutomationManager";
 import { TerminalDescriptor, TerminalManager } from "./terminalManager";
 import { TerminalState, TerminalStateManager } from "./terminalStateManager";
 
@@ -25,6 +28,7 @@ type SortMode =
   | "selected-first";
 
 type GroupMode = "none" | "tool-type";
+type PanelLanguage = "en" | "zh-CN";
 
 interface ViewPreferences {
   sortMode: SortMode;
@@ -47,6 +51,11 @@ type ViewMessage =
   | { type: "clearSelection" }
   | { type: "setSelection"; selectedKeys: string[] }
   | { type: "sendCommand"; command: string }
+  | { type: "setPanelLanguage"; language: PanelLanguage }
+  | { type: "startPolling"; command: string; intervalMs: number }
+  | { type: "stopPolling" }
+  | { type: "startTaskChain"; script: string; waitTimeoutMs: number }
+  | { type: "stopTaskChain" }
   | { type: "updateSetting"; key: string; value: string | number | boolean }
   | { type: "updateViewPreferences"; payload: ViewPreferencesPatch };
 
@@ -55,14 +64,23 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
 
   private static readonly viewPreferencesStateKey =
     "cursorTerminalNexus.controlPanel.viewPreferences";
+  private static readonly panelLanguageStateKey =
+    "cursorTerminalNexus.controlPanel.panelLanguage";
 
   private readonly disposables: vscode.Disposable[] = [];
+  private readonly panelBundles: Record<PanelLanguage, Record<string, string>>;
   private view?: vscode.WebviewView;
   private terminals: ManagedTerminal[] = [];
   private selectedKeys = new Set<string>();
   private refreshNonce = 0;
   private viewPreferences: ViewPreferences;
+  private panelLanguage: PanelLanguage;
   private postStateTimer?: NodeJS.Timeout;
+  private readonly taskAutomationManager: TaskAutomationManager;
+  private lastAutomationErrors = {
+    polling: "",
+    chain: ""
+  };
 
   constructor(
     private readonly extensionContext: vscode.ExtensionContext,
@@ -71,11 +89,20 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
     private readonly quickCommands: QuickCommands,
     private readonly broadcaster: Broadcaster
   ) {
+    this.panelBundles = {
+      en: this.loadPanelBundle("bundle.l10n.json"),
+      "zh-CN": this.loadPanelBundle("bundle.l10n.zh-cn.json")
+    };
+    this.taskAutomationManager = new TaskAutomationManager(
+      this.terminalStateManager,
+      this.broadcaster
+    );
     this.viewPreferences = sanitizeViewPreferences(
       this.extensionContext.workspaceState.get(
         ControlPanelProvider.viewPreferencesStateKey
       )
     );
+    this.panelLanguage = this.resolveInitialPanelLanguage();
 
     this.disposables.push(
       vscode.window.onDidOpenTerminal(() => {
@@ -91,6 +118,10 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
       }),
       this.terminalStateManager.onDidChangeState(() => {
         this.schedulePostState();
+      }),
+      this.taskAutomationManager.onDidChangeStatus((status) => {
+        this.handleAutomationStatus(status);
+        this.schedulePostState();
       })
     );
   }
@@ -100,6 +131,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
       clearTimeout(this.postStateTimer);
       this.postStateTimer = undefined;
     }
+    this.taskAutomationManager.dispose();
     for (const disposable of this.disposables) {
       disposable.dispose();
     }
@@ -165,6 +197,25 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
       case "sendCommand":
         await this.sendSelected(message.command);
         return;
+      case "setPanelLanguage":
+        await this.setPanelLanguage(message.language);
+        return;
+      case "startPolling":
+        this.startPolling(message.command, message.intervalMs);
+        await this.postState();
+        return;
+      case "stopPolling":
+        this.taskAutomationManager.stopPolling();
+        await this.postState();
+        return;
+      case "startTaskChain":
+        this.startTaskChain(message.script, message.waitTimeoutMs);
+        await this.postState();
+        return;
+      case "stopTaskChain":
+        this.taskAutomationManager.stopChain();
+        await this.postState();
+        return;
       case "updateSetting":
         await this.handleSettingUpdate(message.key, message.value);
         return;
@@ -229,13 +280,13 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
       viewPreferences: this.viewPreferences,
       settings: {
         autoSelectRegex: config.autoSelectRegex,
-        autoSendEnabled: config.autoSendEnabled,
-        autoSendDelayMs: config.autoSendDelayMs,
         requireConfirmBeforeBroadcast: config.options.requireConfirmBeforeBroadcast,
         enableSensitiveCommandGuard: config.options.enableSensitiveCommandGuard,
         waveThreshold: config.options.waveThreshold,
         waveDelayMs: config.options.waveDelayMs
-      }
+      },
+      panelLanguage: this.panelLanguage,
+      automation: this.taskAutomationManager.getStatus()
     });
   }
 
@@ -258,7 +309,8 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
     const sentCount = await this.broadcaster.broadcast(
       targets,
       text,
-      readNexusConfig().options
+      readNexusConfig().options,
+      { skipBusyFilter: true, waitUntilReadyMs: 8000, allowForceAfterReadyTimeout: true }
     );
     if (sentCount === 0) {
       return;
@@ -333,65 +385,216 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
     );
   }
 
+  private startPolling(command: string, intervalMs: number): void {
+    const targets = this.resolveSelectedTerminals();
+    try {
+      this.taskAutomationManager.startPolling(
+        targets,
+        command,
+        intervalMs,
+        readNexusConfig().options
+      );
+    } catch (error) {
+      void vscode.window.showWarningMessage(toErrorMessage(error));
+    }
+  }
+
+  private startTaskChain(script: string, waitTimeoutMs: number): void {
+    const targets = this.resolveSelectedTerminals();
+    try {
+      this.taskAutomationManager.startChain(
+        targets,
+        script,
+        waitTimeoutMs,
+        readNexusConfig().options
+      );
+    } catch (error) {
+      void vscode.window.showWarningMessage(toErrorMessage(error));
+    }
+  }
+
+  private resolveSelectedTerminals(): vscode.Terminal[] {
+    return this.terminals
+      .filter((item) => this.selectedKeys.has(item.key))
+      .map((item) => item.terminal);
+  }
+
+  private handleAutomationStatus(status: AutomationStatus): void {
+    if (status.polling.error && status.polling.error !== this.lastAutomationErrors.polling) {
+      this.lastAutomationErrors.polling = status.polling.error;
+      void vscode.window.showWarningMessage(
+        vscode.l10n.t("Polling stopped: {0}", status.polling.error)
+      );
+    } else if (!status.polling.error) {
+      this.lastAutomationErrors.polling = "";
+    }
+
+    if (status.chain.error && status.chain.error !== this.lastAutomationErrors.chain) {
+      this.lastAutomationErrors.chain = status.chain.error;
+      void vscode.window.showWarningMessage(
+        vscode.l10n.t("Task chain stopped: {0}", status.chain.error)
+      );
+    } else if (!status.chain.error) {
+      this.lastAutomationErrors.chain = "";
+    }
+  }
+
+  private async setPanelLanguage(language: PanelLanguage): Promise<void> {
+    if (!isPanelLanguage(language) || language === this.panelLanguage) {
+      return;
+    }
+    this.panelLanguage = language;
+    await this.extensionContext.workspaceState.update(
+      ControlPanelProvider.panelLanguageStateKey,
+      language
+    );
+    if (this.view) {
+      this.view.webview.html = this.getWebviewHtml(this.view.webview);
+    }
+  }
+
+  private resolveInitialPanelLanguage(): PanelLanguage {
+    const stored = this.extensionContext.workspaceState.get(
+      ControlPanelProvider.panelLanguageStateKey
+    );
+    if (isPanelLanguage(stored)) {
+      return stored;
+    }
+    return /^zh(-|$)/i.test(vscode.env.language) ? "zh-CN" : "en";
+  }
+
+  private loadPanelBundle(fileName: string): Record<string, string> {
+    try {
+      const fullPath = path.join(this.extensionContext.extensionPath, "l10n", fileName);
+      const content = fs.readFileSync(fullPath, "utf8");
+      const parsed = JSON.parse(content) as Record<string, string>;
+      return parsed;
+    } catch {
+      return {};
+    }
+  }
+
+  private localizePanel(
+    language: PanelLanguage,
+    key: string,
+    ...args: string[]
+  ): string {
+    const template = this.panelBundles[language][key] ?? key;
+    return formatL10nMessage(template, args);
+  }
+
   private getWebviewHtml(webview: vscode.Webview): string {
     const nonce = getNonce();
     const csp = `default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';`;
-    const locale = /^zh(-|$)/i.test(vscode.env.language) ? "zh-CN" : "en";
+    const locale = this.panelLanguage;
+    const l = (key: string, ...args: string[]) =>
+      this.localizePanel(locale, key, ...args);
     const i18n = {
-      title: vscode.l10n.t("TQ Terminal Nexus"),
-      refresh: vscode.l10n.t("Refresh"),
-      selectAll: vscode.l10n.t("Select All"),
-      clear: vscode.l10n.t("Clear"),
-      selectedCount: vscode.l10n.t("Selected {0} / {1}"),
-      groupBy: vscode.l10n.t("Group By"),
-      groupNone: vscode.l10n.t("No Grouping"),
-      groupToolType: vscode.l10n.t("Tool Type"),
-      sortBy: vscode.l10n.t("Sort By"),
-      sortCustom: vscode.l10n.t("Custom Order"),
-      sortNameAsc: vscode.l10n.t("Name A-Z"),
-      sortNameDesc: vscode.l10n.t("Name Z-A"),
-      sortPidAsc: vscode.l10n.t("PID Asc"),
-      sortPidDesc: vscode.l10n.t("PID Desc"),
-      sortSelectedFirst: vscode.l10n.t("Selected First"),
-      customDragEnabled: vscode.l10n.t("Drag items to customize order."),
-      customDragDisabled: vscode.l10n.t(
+      title: l("TQ Terminal Nexus"),
+      refresh: l("Refresh"),
+      selectAll: l("Select All"),
+      clear: l("Clear"),
+      selectedCount: l("Selected {0} / {1}"),
+      groupBy: l("Group By"),
+      groupNone: l("No Grouping"),
+      groupToolType: l("Tool Type"),
+      sortBy: l("Sort By"),
+      sortCustom: l("Custom Order"),
+      sortNameAsc: l("Name A-Z"),
+      sortNameDesc: l("Name Z-A"),
+      sortPidAsc: l("PID Asc"),
+      sortPidDesc: l("PID Desc"),
+      sortSelectedFirst: l("Selected First"),
+      customDragEnabled: l("Drag items to customize order."),
+      customDragDisabled: l(
         "Drag reorder is available only in No Grouping + Custom Order mode."
       ),
-      collapseGroup: vscode.l10n.t("Collapse group"),
-      expandGroup: vscode.l10n.t("Expand group"),
-      dragHandle: vscode.l10n.t("Drag to reorder"),
-      groupBasic: vscode.l10n.t("Basic Terminal"),
-      groupSecurity: vscode.l10n.t("Security"),
-      groupNetwork: vscode.l10n.t("Network"),
-      groupDevOps: vscode.l10n.t("DevOps"),
-      groupData: vscode.l10n.t("Data"),
-      groupOther: vscode.l10n.t("Other"),
-      command: vscode.l10n.t("Command"),
-      sendShortcut: vscode.l10n.t("Ctrl/Cmd + Enter to send"),
-      commandInputPlaceholder: vscode.l10n.t("Enter text or command to broadcast"),
-      commandPlaceholderHelp: vscode.l10n.t(
+      collapseGroup: l("Collapse group"),
+      expandGroup: l("Expand group"),
+      dragHandle: l("Drag to reorder"),
+      groupBasic: l("Basic Terminal"),
+      groupSecurity: l("Security"),
+      groupNetwork: l("Network"),
+      groupDevOps: l("DevOps"),
+      groupData: l("Data"),
+      groupOther: l("Other"),
+      tabSendNow: l("Send Now"),
+      tabPolling: l("Polling"),
+      tabTaskChain: l("Task Chain"),
+      command: l("Command"),
+      sendShortcut: l("Ctrl/Cmd + Enter to send"),
+      commandInputPlaceholder: l("Enter text or command to broadcast"),
+      commandPlaceholderHelp: l(
         "Placeholders: {name}, {index}, quoted name: {name:quoted}"
       ),
-      sendToSelectedTerminals: vscode.l10n.t("Send to Selected Terminals"),
-      autoSend: vscode.l10n.t("Auto Send"),
-      autoSendDescription: vscode.l10n.t("Send automatically after input"),
-      autoSendDelay: vscode.l10n.t("Auto-send Delay"),
-      autoSelectRegex: vscode.l10n.t("Auto-select Regex"),
-      autoSelectRegexPlaceholder: vscode.l10n.t("e.g. Agent.*"),
-      confirmBeforeBroadcast: vscode.l10n.t("Confirm Before Send"),
-      sensitiveCommandGuard: vscode.l10n.t("Sensitive Command Guard"),
-      enabled: vscode.l10n.t("Enabled"),
-      waveThreshold: vscode.l10n.t("Wave Threshold"),
-      waveDelay: vscode.l10n.t("Wave Delay"),
-      noTerminalsAvailable: vscode.l10n.t("No terminals available."),
-      pidWithValue: vscode.l10n.t("PID: {0}"),
-      pidUnknown: vscode.l10n.t("PID: Unknown"),
-      stateIdle: vscode.l10n.t("Idle"),
-      stateRunningProgram: vscode.l10n.t("Running Program"),
-      stateCliWaiting: vscode.l10n.t("CLI Waiting"),
-      stateCliThinking: vscode.l10n.t("CLI Thinking"),
-      statusReady: vscode.l10n.t("Ready"),
-      statusBusy: vscode.l10n.t("Busy")
+      sendToSelectedTerminals: l("Send to Selected Terminals"),
+      pollingCommand: l("Polling Command"),
+      pollingCommandPlaceholder: l("Enter command for interval sending"),
+      pollingIntervalSeconds: l("Interval (seconds)"),
+      startPolling: l("Start Polling"),
+      stopPolling: l("Stop Polling"),
+      pollingStatusIdle: l("Polling idle"),
+      pollingStatusRunning: l(
+        "Polling every {0}s, last sent {1} terminal(s)"
+      ),
+      pollingStatusError: l("Polling error: {0}"),
+      chainScript: l("Task Chain Script"),
+      chainScriptPlaceholder: l(
+        "One command per line. Use directives like {delay: 2000} and {wait_ready: 5000, timeout: 120000}."
+      ),
+      chainSyntaxHelp: l(
+        "Directives: {delay:ms}, {wait_ready:ms}, {wait_idle:ms}, optional timeout: {wait_ready:ms, timeout:ms}; comments start with #."
+      ),
+      chainPreview: l("Syntax Preview"),
+      chainPreviewOk: l("No syntax issues"),
+      chainLineError: l("Line {0}: {1}"),
+      chainErrorUnknownDirective: l("Unknown directive"),
+      chainErrorEmptyDirective: l("Empty directive"),
+      chainErrorInvalidToken: l("Invalid directive token"),
+      chainErrorWaitConflict: l(
+        "wait_ready and wait_idle cannot be used together"
+      ),
+      chainErrorDelayExtra: l("delay cannot be combined with other keys"),
+      chainErrorWaitExtra: l(
+        "wait_ready/wait_idle only allow optional timeout"
+      ),
+      chainErrorTimeoutMin: l("timeout must be >= 1000"),
+      chainErrorDirectiveValue: l(
+        "Directive value must be number milliseconds"
+      ),
+      chainErrorDirectiveSyntax: l(
+        "Invalid directive syntax. Use {wait_ready: 5000}"
+      ),
+      chainWaitTimeoutSeconds: l("Wait timeout per step (seconds)"),
+      startChain: l("Start Chain"),
+      stopChain: l("Stop Chain"),
+      chainStatusIdle: l("Task chain idle"),
+      chainStatusRunning: l("Running step {0}/{1}: {2}"),
+      chainStatusDone: l("Task chain completed"),
+      chainStatusStopped: l("Task chain stopped"),
+      chainStatusError: l("Task chain error: {0}"),
+      autoSelectRegex: l("Auto-select Regex"),
+      autoSelectRegexPlaceholder: l("e.g. Agent.*"),
+      confirmBeforeBroadcast: l("Confirm Before Send"),
+      sensitiveCommandGuard: l("Sensitive Command Guard"),
+      enabled: l("Enabled"),
+      waveThreshold: l("Wave Threshold"),
+      waveDelay: l("Wave Delay"),
+      noTerminalsAvailable: l("No terminals available."),
+      pidWithValue: l("PID: {0}"),
+      pidUnknown: l("PID: Unknown"),
+      stateIdle: l("Idle"),
+      stateRunningProgram: l("Running Program"),
+      stateCliWaiting: l("CLI Waiting"),
+      stateCliThinking: l("CLI Thinking"),
+      statusReady: l("Ready"),
+      statusBusy: l("Busy"),
+      settingsTitle: l("Settings"),
+      settingsOpen: l("Open settings"),
+      settingsClose: l("Close"),
+      language: l("Language"),
+      languageEnglish: l("English"),
+      languageChinese: l("Chinese")
     };
     const i18nJson = JSON.stringify(i18n);
 
@@ -608,9 +811,125 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
       min-width: 0;
       flex: 1;
     }
+    .settings-slot {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      flex: 0 0 auto;
+      min-width: 28px;
+    }
+    .tab-row {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+    .tab-button {
+      flex: 1;
+      text-align: center;
+    }
+    .tab-button.active {
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+    }
+    .tab-panel {
+      display: none;
+    }
+    .tab-panel.active {
+      display: block;
+    }
+    .status-line {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 11px;
+      min-height: 16px;
+      white-space: pre-wrap;
+    }
+    .chain-preview {
+      margin-top: 6px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 6px;
+      max-height: 150px;
+      overflow: auto;
+      background: var(--vscode-editor-background);
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 11px;
+      line-height: 1.35;
+    }
+    .chain-preview-line {
+      display: flex;
+      gap: 6px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .chain-preview-line.empty {
+      opacity: 0.5;
+    }
+    .chain-preview-line.comment {
+      color: var(--vscode-terminal-ansiGreen, #3fb950);
+    }
+    .chain-preview-line.directive {
+      color: var(--vscode-terminal-ansiCyan, #39c5cf);
+    }
+    .chain-preview-line.error {
+      color: var(--vscode-errorForeground, #f85149);
+    }
+    .chain-preview-line .line-no {
+      width: 24px;
+      color: var(--muted);
+      text-align: right;
+      flex-shrink: 0;
+    }
+    .icon-btn {
+      width: 28px;
+      height: 24px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      line-height: 1;
+    }
+    .settings-panel {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      width: 220px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px;
+      background: var(--vscode-sideBar-background);
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+      z-index: 20;
+      display: none;
+    }
+    .settings-panel.visible {
+      display: block;
+    }
+    .settings-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
   </style>
 </head>
 <body>
+  <div id="settingsPanel" class="settings-panel">
+    <div class="settings-header">
+      <span>${i18n.settingsTitle}</span>
+      <button id="settingsCloseBtn">${i18n.settingsClose}</button>
+    </div>
+    <div class="row">
+      <span class="label">${i18n.language}</span>
+      <select id="panelLanguageSelect">
+        <option value="zh-CN">${i18n.languageChinese}</option>
+        <option value="en">${i18n.languageEnglish}</option>
+      </select>
+    </div>
+  </div>
+
   <div class="block">
     <div class="row">
       <button id="refreshBtn">${i18n.refresh}</button>
@@ -637,35 +956,77 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
           <option value="selected-first">${i18n.sortSelectedFirst}</option>
         </select>
       </div>
+      <div class="settings-slot">
+        <button id="settingsBtn" class="icon-btn" title="${i18n.settingsOpen}">⚙</button>
+      </div>
     </div>
     <div id="dragHint" class="sub"></div>
     <div id="terminalList" class="terminal-list"></div>
   </div>
 
   <div class="block">
-    <div class="row">
-      <span class="label">${i18n.command}</span>
-      <span class="sub">${i18n.sendShortcut}</span>
+    <div class="tab-row">
+      <button id="tabSendBtn" class="tab-button active">${i18n.tabSendNow}</button>
+      <button id="tabPollingBtn" class="tab-button">${i18n.tabPolling}</button>
+      <button id="tabChainBtn" class="tab-button">${i18n.tabTaskChain}</button>
     </div>
-    <textarea id="commandInput" placeholder="${i18n.commandInputPlaceholder}"></textarea>
-    <div class="row">
-      <span class="sub">${i18n.commandPlaceholderHelp}</span>
+
+    <div id="tabSendPanel" class="tab-panel active">
+      <div class="row">
+        <span class="label">${i18n.command}</span>
+        <span class="sub">${i18n.sendShortcut}</span>
+      </div>
+      <textarea id="commandInput" placeholder="${i18n.commandInputPlaceholder}"></textarea>
+      <div class="row">
+        <span class="sub">${i18n.commandPlaceholderHelp}</span>
+      </div>
+      <div class="row" style="margin-top:8px;">
+        <button id="sendBtn" class="primary">${i18n.sendToSelectedTerminals}</button>
+      </div>
     </div>
-    <div class="row" style="margin-top:8px;">
-      <button id="sendBtn" class="primary">${i18n.sendToSelectedTerminals}</button>
+
+    <div id="tabPollingPanel" class="tab-panel">
+      <div class="row">
+        <span class="label">${i18n.pollingCommand}</span>
+      </div>
+      <textarea id="pollingCommandInput" placeholder="${i18n.pollingCommandPlaceholder}"></textarea>
+      <div class="row" style="margin-top:8px;">
+        <span class="label">${i18n.pollingIntervalSeconds}</span>
+        <input id="pollingIntervalSec" type="number" min="1" step="1" value="5" />
+      </div>
+      <div class="row">
+        <button id="startPollingBtn" class="primary">${i18n.startPolling}</button>
+        <button id="stopPollingBtn">${i18n.stopPolling}</button>
+      </div>
+      <div id="pollingStatus" class="status-line"></div>
+    </div>
+
+    <div id="tabChainPanel" class="tab-panel">
+      <div class="row">
+        <span class="label">${i18n.chainScript}</span>
+      </div>
+      <textarea id="chainScriptInput" placeholder="${i18n.chainScriptPlaceholder}"></textarea>
+      <div class="row">
+        <span class="sub">${i18n.chainSyntaxHelp}</span>
+      </div>
+      <div class="row">
+        <span class="label">${i18n.chainPreview}</span>
+      </div>
+      <div id="chainPreview" class="chain-preview"></div>
+      <div id="chainLintStatus" class="status-line"></div>
+      <div class="row">
+        <span class="label">${i18n.chainWaitTimeoutSeconds}</span>
+        <input id="chainWaitTimeoutSec" type="number" min="1" step="1" value="300" />
+      </div>
+      <div class="row">
+        <button id="startChainBtn" class="primary">${i18n.startChain}</button>
+        <button id="stopChainBtn">${i18n.stopChain}</button>
+      </div>
+      <div id="chainStatus" class="status-line"></div>
     </div>
   </div>
 
   <div class="block">
-    <div class="row">
-      <span class="label">${i18n.autoSend}</span>
-      <label><input type="checkbox" id="autoSendEnabled" /> ${i18n.autoSendDescription}</label>
-    </div>
-    <div class="row">
-      <span class="label">${i18n.autoSendDelay}</span>
-      <input id="autoSendDelayMs" type="number" min="200" step="100" />
-      <span class="sub">ms</span>
-    </div>
     <div class="row">
       <span class="label">${i18n.autoSelectRegex}</span>
       <input id="autoSelectRegex" type="text" placeholder="${i18n.autoSelectRegexPlaceholder}" />
@@ -706,17 +1067,35 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
       },
       settings: {
         autoSelectRegex: "",
-        autoSendEnabled: false,
-        autoSendDelayMs: 800,
         requireConfirmBeforeBroadcast: false,
         enableSensitiveCommandGuard: true,
         waveThreshold: 20,
         waveDelayMs: 20
+      },
+      panelLanguage: "${locale}",
+      automation: {
+        polling: {
+          active: false,
+          command: "",
+          intervalMs: 5000,
+          targetCount: 0,
+          lastRunAt: undefined,
+          lastSentCount: 0,
+          error: ""
+        },
+        chain: {
+          active: false,
+          currentStep: 0,
+          totalSteps: 0,
+          targetCount: 0,
+          detail: "",
+          error: ""
+        }
       }
     };
 
-    let autoSendTimer;
-    let lastAutoSent = "";
+    let activeTab = "send";
+    let settingsPanelVisible = false;
     let draggingKey = "";
     let dragHandleKey = "";
 
@@ -728,6 +1107,10 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
     const terminalList = document.getElementById("terminalList");
     const selectedCount = document.getElementById("selectedCount");
     const commandInput = document.getElementById("commandInput");
+    const settingsBtn = document.getElementById("settingsBtn");
+    const settingsPanel = document.getElementById("settingsPanel");
+    const settingsCloseBtn = document.getElementById("settingsCloseBtn");
+    const panelLanguageSelect = document.getElementById("panelLanguageSelect");
     const refreshBtn = document.getElementById("refreshBtn");
     const selectAllBtn = document.getElementById("selectAllBtn");
     const clearBtn = document.getElementById("clearBtn");
@@ -736,16 +1119,36 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
     const sortModeSelect = document.getElementById("sortModeSelect");
     const dragHint = document.getElementById("dragHint");
 
-    const autoSendEnabled = document.getElementById("autoSendEnabled");
-    const autoSendDelayMs = document.getElementById("autoSendDelayMs");
+    const tabSendBtn = document.getElementById("tabSendBtn");
+    const tabPollingBtn = document.getElementById("tabPollingBtn");
+    const tabChainBtn = document.getElementById("tabChainBtn");
+    const tabSendPanel = document.getElementById("tabSendPanel");
+    const tabPollingPanel = document.getElementById("tabPollingPanel");
+    const tabChainPanel = document.getElementById("tabChainPanel");
+
+    const pollingCommandInput = document.getElementById("pollingCommandInput");
+    const pollingIntervalSec = document.getElementById("pollingIntervalSec");
+    const startPollingBtn = document.getElementById("startPollingBtn");
+    const stopPollingBtn = document.getElementById("stopPollingBtn");
+    const pollingStatus = document.getElementById("pollingStatus");
+
+    const chainScriptInput = document.getElementById("chainScriptInput");
+    const chainPreview = document.getElementById("chainPreview");
+    const chainLintStatus = document.getElementById("chainLintStatus");
+    const chainWaitTimeoutSec = document.getElementById("chainWaitTimeoutSec");
+    const startChainBtn = document.getElementById("startChainBtn");
+    const stopChainBtn = document.getElementById("stopChainBtn");
+    const chainStatus = document.getElementById("chainStatus");
+
     const autoSelectRegex = document.getElementById("autoSelectRegex");
     const requireConfirmBeforeBroadcast = document.getElementById("requireConfirmBeforeBroadcast");
     const enableSensitiveCommandGuard = document.getElementById("enableSensitiveCommandGuard");
     const waveThreshold = document.getElementById("waveThreshold");
     const waveDelayMs = document.getElementById("waveDelayMs");
+    let chainLintError = "";
 
     function format(message, ...args) {
-      return message.replace(/\{(\d+)\}/g, (_, index) => {
+      return message.replace(/\\{(\\d+)\\}/g, (_, index) => {
         const value = args[Number(index)];
         return value === undefined ? "" : String(value);
       });
@@ -1232,9 +1635,30 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
         : i18n.customDragDisabled;
     }
 
+    function setActiveTab(tab) {
+      activeTab = tab;
+      const isSend = tab === "send";
+      const isPolling = tab === "polling";
+      const isChain = tab === "chain";
+
+      tabSendBtn.classList.toggle("active", isSend);
+      tabPollingBtn.classList.toggle("active", isPolling);
+      tabChainBtn.classList.toggle("active", isChain);
+      tabSendPanel.classList.toggle("active", isSend);
+      tabPollingPanel.classList.toggle("active", isPolling);
+      tabChainPanel.classList.toggle("active", isChain);
+    }
+
+    function setSettingsPanelVisible(visible) {
+      settingsPanelVisible = Boolean(visible);
+      settingsPanel.classList.toggle("visible", settingsPanelVisible);
+    }
+
+    function renderPanelSettings() {
+      panelLanguageSelect.value = state.panelLanguage || "${locale}";
+    }
+
     function renderSettings() {
-      autoSendEnabled.checked = Boolean(state.settings.autoSendEnabled);
-      autoSendDelayMs.value = String(state.settings.autoSendDelayMs);
       autoSelectRegex.value = state.settings.autoSelectRegex || "";
       requireConfirmBeforeBroadcast.checked = Boolean(state.settings.requireConfirmBeforeBroadcast);
       enableSensitiveCommandGuard.checked = Boolean(state.settings.enableSensitiveCommandGuard);
@@ -1247,10 +1671,234 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
       sortModeSelect.value = state.viewPreferences.sortMode;
     }
 
+    function escapeHtml(value) {
+      return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function parseDirectiveFields(content) {
+      const fields = new Map();
+      const tokens = String(content)
+        .split(",")
+        .map((part) => part.trim())
+        .filter((part) => part.length > 0);
+      if (tokens.length === 0) {
+        return { errorKey: "chainErrorEmptyDirective" };
+      }
+      for (const token of tokens) {
+        const match = token.match(/^([a-z_]+)\\s*:\\s*(\\d+)$/i);
+        if (!match) {
+          return { errorKey: "chainErrorInvalidToken" };
+        }
+        fields.set(match[1].toLowerCase(), Number(match[2]));
+      }
+      return { fields };
+    }
+
+    function lintChainScript(scriptText) {
+      const lines = String(scriptText || "").split(/\\r?\\n/);
+      const items = [];
+      let firstError = null;
+
+      lines.forEach((raw, index) => {
+        const lineNo = index + 1;
+        const line = raw.trim();
+
+        if (!line) {
+          items.push({ lineNo, className: "empty", text: raw || " " });
+          return;
+        }
+
+        if (line.startsWith("#")) {
+          items.push({ lineNo, className: "comment", text: raw });
+          return;
+        }
+
+        const plainDirective = line.match(/^(wait_ready|wait_idle|delay)\\s*:\\s*(.+)$/i);
+        if (plainDirective) {
+          const rawValue = plainDirective[2].trim();
+          if (!/^\\d+$/.test(rawValue)) {
+            const message = i18n.chainErrorDirectiveValue;
+            items.push({ lineNo, className: "error", text: raw + "  // " + message });
+            if (!firstError) {
+              firstError = format(i18n.chainLineError, lineNo, message);
+            }
+            return;
+          }
+          items.push({ lineNo, className: "directive", text: raw });
+          return;
+        }
+
+        if (/^(wait_ready|wait_idle|delay)\\s*:/i.test(line)) {
+          const message = i18n.chainErrorDirectiveSyntax;
+          items.push({ lineNo, className: "error", text: raw + "  // " + message });
+          if (!firstError) {
+            firstError = format(i18n.chainLineError, lineNo, message);
+          }
+          return;
+        }
+
+        if (line.startsWith("{") && line.endsWith("}")) {
+          const parsed = parseDirectiveFields(line.slice(1, -1));
+          if (parsed.errorKey) {
+            const message = i18n[parsed.errorKey] || i18n.chainErrorInvalidToken;
+            items.push({ lineNo, className: "error", text: raw + "  // " + message });
+            if (!firstError) {
+              firstError = format(i18n.chainLineError, lineNo, message);
+            }
+            return;
+          }
+
+          const fields = parsed.fields;
+          const hasDelay = fields.has("delay");
+          const hasWaitReady = fields.has("wait_ready");
+          const hasWaitIdle = fields.has("wait_idle");
+
+          if (hasDelay) {
+            if (fields.size !== 1) {
+              const message = i18n.chainErrorDelayExtra;
+              items.push({ lineNo, className: "error", text: raw + "  // " + message });
+              if (!firstError) {
+                firstError = format(i18n.chainLineError, lineNo, message);
+              }
+              return;
+            }
+            items.push({ lineNo, className: "directive", text: raw });
+            return;
+          }
+
+          if (hasWaitReady || hasWaitIdle) {
+            if (hasWaitReady && hasWaitIdle) {
+              const message = i18n.chainErrorWaitConflict;
+              items.push({ lineNo, className: "error", text: raw + "  // " + message });
+              if (!firstError) {
+                firstError = format(i18n.chainLineError, lineNo, message);
+              }
+              return;
+            }
+            const allowed = new Set(["wait_ready", "wait_idle", "timeout"]);
+            const hasExtra = [...fields.keys()].some((key) => !allowed.has(key));
+            if (hasExtra) {
+              const message = i18n.chainErrorWaitExtra;
+              items.push({ lineNo, className: "error", text: raw + "  // " + message });
+              if (!firstError) {
+                firstError = format(i18n.chainLineError, lineNo, message);
+              }
+              return;
+            }
+            if (fields.has("timeout") && Number(fields.get("timeout")) < 1000) {
+              const message = i18n.chainErrorTimeoutMin;
+              items.push({ lineNo, className: "error", text: raw + "  // " + message });
+              if (!firstError) {
+                firstError = format(i18n.chainLineError, lineNo, message);
+              }
+              return;
+            }
+            items.push({ lineNo, className: "directive", text: raw });
+            return;
+          }
+
+          const message = i18n.chainErrorUnknownDirective;
+          items.push({ lineNo, className: "error", text: raw + "  // " + message });
+          if (!firstError) {
+            firstError = format(i18n.chainLineError, lineNo, message);
+          }
+          return;
+        }
+
+        items.push({ lineNo, className: "command", text: raw });
+      });
+
+      return {
+        items,
+        error: firstError
+      };
+    }
+
+    function renderChainPreview() {
+      const lint = lintChainScript(chainScriptInput.value);
+      chainLintError = lint.error || "";
+      chainPreview.innerHTML = lint.items
+        .map((item) => {
+          return (
+            '<div class="chain-preview-line ' +
+            item.className +
+            '">' +
+            '<span class="line-no">' +
+            item.lineNo +
+            "</span>" +
+            '<span class="line-text">' +
+            escapeHtml(item.text) +
+            "</span>" +
+            "</div>"
+          );
+        })
+        .join("");
+      chainLintStatus.textContent = chainLintError || i18n.chainPreviewOk;
+    }
+
+    function renderAutomationStatus() {
+      const polling = state.automation?.polling;
+      const chain = state.automation?.chain;
+
+      if (polling) {
+        if (polling.error) {
+          pollingStatus.textContent = format(i18n.pollingStatusError, polling.error);
+        } else if (polling.active) {
+          const seconds = Math.max(1, Math.round((polling.intervalMs || 1000) / 1000));
+          pollingStatus.textContent = format(
+            i18n.pollingStatusRunning,
+            seconds,
+            polling.lastSentCount || 0
+          );
+        } else {
+          pollingStatus.textContent = i18n.pollingStatusIdle;
+        }
+        startPollingBtn.disabled = Boolean(polling.active);
+        stopPollingBtn.disabled = !polling.active;
+      } else {
+        pollingStatus.textContent = i18n.pollingStatusIdle;
+        startPollingBtn.disabled = false;
+        stopPollingBtn.disabled = true;
+      }
+
+      if (chain) {
+        if (chain.error) {
+          chainStatus.textContent = format(i18n.chainStatusError, chain.error);
+        } else if (chain.active) {
+          chainStatus.textContent = format(
+            i18n.chainStatusRunning,
+            chain.currentStep || 0,
+            chain.totalSteps || 0,
+            chain.detail || ""
+          );
+        } else if (chain.detail === "Completed") {
+          chainStatus.textContent = i18n.chainStatusDone;
+        } else if (chain.detail === "Stopped") {
+          chainStatus.textContent = i18n.chainStatusStopped;
+        } else {
+          chainStatus.textContent = chainLintError || i18n.chainStatusIdle;
+        }
+        startChainBtn.disabled = Boolean(chain.active);
+        stopChainBtn.disabled = !chain.active;
+      } else {
+        chainStatus.textContent = chainLintError || i18n.chainStatusIdle;
+        startChainBtn.disabled = false;
+        stopChainBtn.disabled = true;
+      }
+    }
+
     function render() {
       renderViewPreferences();
       renderTerminals();
+      renderPanelSettings();
       renderSettings();
+      renderChainPreview();
+      renderAutomationStatus();
     }
 
     function sendCurrentText() {
@@ -1258,35 +1906,66 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
       if (!text) {
         return;
       }
-      lastAutoSent = text;
       post({ type: "sendCommand", command: text });
     }
 
-    function scheduleAutoSend() {
-      if (!autoSendEnabled.checked) {
-        return;
-      }
-      const raw = commandInput.value.trim();
-      if (!raw) {
-        return;
-      }
+    function startPollingTask() {
+      const intervalSeconds = Math.max(1, Number(pollingIntervalSec.value) || 5);
+      post({
+        type: "startPolling",
+        command: pollingCommandInput.value,
+        intervalMs: intervalSeconds * 1000
+      });
+    }
 
-      const delay = Math.max(200, Number(autoSendDelayMs.value) || 800);
-      clearTimeout(autoSendTimer);
-      autoSendTimer = setTimeout(() => {
-        const latest = commandInput.value.trim();
-        if (!latest || latest === lastAutoSent) {
-          return;
-        }
-        lastAutoSent = latest;
-        post({ type: "sendCommand", command: latest });
-      }, delay);
+    function startTaskChain() {
+      renderChainPreview();
+      if (chainLintError) {
+        return;
+      }
+      const timeoutSeconds = Math.max(1, Number(chainWaitTimeoutSec.value) || 300);
+      post({
+        type: "startTaskChain",
+        script: chainScriptInput.value,
+        waitTimeoutMs: timeoutSeconds * 1000
+      });
     }
 
     refreshBtn.addEventListener("click", () => post({ type: "refreshTerminals" }));
     selectAllBtn.addEventListener("click", () => post({ type: "selectAll" }));
     clearBtn.addEventListener("click", () => post({ type: "clearSelection" }));
     sendBtn.addEventListener("click", sendCurrentText);
+    startPollingBtn.addEventListener("click", startPollingTask);
+    stopPollingBtn.addEventListener("click", () => post({ type: "stopPolling" }));
+    startChainBtn.addEventListener("click", startTaskChain);
+    stopChainBtn.addEventListener("click", () => post({ type: "stopTaskChain" }));
+    settingsBtn.addEventListener("click", () => {
+      setSettingsPanelVisible(!settingsPanelVisible);
+    });
+    settingsCloseBtn.addEventListener("click", () => {
+      setSettingsPanelVisible(false);
+    });
+    panelLanguageSelect.addEventListener("change", () => {
+      const next = panelLanguageSelect.value === "zh-CN" ? "zh-CN" : "en";
+      post({ type: "setPanelLanguage", language: next });
+    });
+    window.addEventListener("click", (event) => {
+      if (!settingsPanelVisible) {
+        return;
+      }
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+      if (settingsPanel.contains(target) || settingsBtn.contains(target)) {
+        return;
+      }
+      setSettingsPanelVisible(false);
+    });
+
+    tabSendBtn.addEventListener("click", () => setActiveTab("send"));
+    tabPollingBtn.addEventListener("click", () => setActiveTab("polling"));
+    tabChainBtn.addEventListener("click", () => setActiveTab("chain"));
 
     groupModeSelect.addEventListener("change", () => {
       saveViewPreferences({ groupMode: groupModeSelect.value });
@@ -1296,24 +1975,17 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
       saveViewPreferences({ sortMode: sortModeSelect.value });
     });
 
-    commandInput.addEventListener("input", scheduleAutoSend);
     commandInput.addEventListener("keydown", (event) => {
       if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
         event.preventDefault();
         sendCurrentText();
       }
     });
+    chainScriptInput.addEventListener("input", () => {
+      renderChainPreview();
+      renderAutomationStatus();
+    });
 
-    autoSendEnabled.addEventListener("change", () => {
-      post({ type: "updateSetting", key: "autoSendEnabled", value: autoSendEnabled.checked });
-    });
-    autoSendDelayMs.addEventListener("change", () => {
-      post({
-        type: "updateSetting",
-        key: "autoSendDelayMs",
-        value: Math.max(200, Number(autoSendDelayMs.value) || 800)
-      });
-    });
     autoSelectRegex.addEventListener("change", () => {
       post({ type: "updateSetting", key: "autoSelectRegex", value: autoSelectRegex.value });
     });
@@ -1355,6 +2027,7 @@ export class ControlPanelProvider implements vscode.WebviewViewProvider, vscode.
       render();
     });
 
+    setActiveTab(activeTab);
     post({ type: "requestState" });
   </script>
 </body>
@@ -1405,8 +2078,6 @@ function applyRegexSelection(
 function isEditableSettingKey(value: string): value is EditableSettingKey {
   return (
     value === "autoSelectRegex" ||
-    value === "autoSendEnabled" ||
-    value === "autoSendDelayMs" ||
     value === "requireConfirmBeforeBroadcast" ||
     value === "enableSensitiveCommandGuard" ||
     value === "waveThreshold" ||
@@ -1421,17 +2092,9 @@ function normalizeSettingValue(
   switch (key) {
     case "autoSelectRegex":
       return String(value);
-    case "autoSendEnabled":
     case "requireConfirmBeforeBroadcast":
     case "enableSensitiveCommandGuard":
       return Boolean(value);
-    case "autoSendDelayMs": {
-      const parsed = Number(value);
-      if (!Number.isFinite(parsed)) {
-        return undefined;
-      }
-      return Math.max(200, Math.round(parsed));
-    }
     case "waveThreshold": {
       const parsed = Number(value);
       if (!Number.isFinite(parsed)) {
@@ -1594,4 +2257,22 @@ function getNonce(): string {
     nonce += characters.charAt(Math.floor(Math.random() * characters.length));
   }
   return nonce;
+}
+
+function toErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  return String(error ?? "Unknown error");
+}
+
+function isPanelLanguage(value: unknown): value is PanelLanguage {
+  return value === "en" || value === "zh-CN";
+}
+
+function formatL10nMessage(template: string, args: string[]): string {
+  return template.replace(/\{(\d+)\}/g, (_, index) => {
+    const value = args[Number(index)];
+    return value === undefined ? "" : String(value);
+  });
 }

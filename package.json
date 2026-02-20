@@ -111,17 +111,6 @@
           "minimum": 1,
           "description": "%config.maxHistory.description%"
         },
-        "cursorTerminalNexus.autoSendEnabled": {
-          "type": "boolean",
-          "default": false,
-          "description": "%config.autoSendEnabled.description%"
-        },
-        "cursorTerminalNexus.autoSendDelayMs": {
-          "type": "number",
-          "default": 800,
-          "minimum": 200,
-          "description": "%config.autoSendDelayMs.description%"
-        },
         "cursorTerminalNexus.cliPrompts": {
           "type": "array",
           "items": {

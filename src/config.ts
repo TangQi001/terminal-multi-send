@@ -5,8 +5,6 @@ const CONFIG_NAMESPACE = "cursorTerminalNexus";
 
 export interface NexusConfig {
   autoSelectRegex: string;
-  autoSendEnabled: boolean;
-  autoSendDelayMs: number;
   options: BroadcastOptions;
 }
 
@@ -14,8 +12,6 @@ export function readNexusConfig(): NexusConfig {
   const config = vscode.workspace.getConfiguration(CONFIG_NAMESPACE);
   return {
     autoSelectRegex: config.get<string>("autoSelectRegex", ""),
-    autoSendEnabled: config.get<boolean>("autoSendEnabled", false),
-    autoSendDelayMs: Math.max(200, config.get<number>("autoSendDelayMs", 800)),
     options: {
       requireConfirmBeforeBroadcast: config.get<boolean>(
         "requireConfirmBeforeBroadcast",
@@ -34,8 +30,6 @@ export function readNexusConfig(): NexusConfig {
 
 export type EditableSettingKey =
   | "autoSelectRegex"
-  | "autoSendEnabled"
-  | "autoSendDelayMs"
   | "requireConfirmBeforeBroadcast"
   | "enableSensitiveCommandGuard"
   | "waveThreshold"
